@@ -13,12 +13,12 @@ import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
 // ⚠️ 여기에 본인 Firebase 프로젝트 설정을 붙여넣으세요 (가이드 3장 참고)
 //    firebase.google.com → 프로젝트 설정 → "내 앱" → SDK 설정 및 구성 → "구성"
 const firebaseConfig = {
-  apiKey: "AIzaSyCM1NYuoGP8L1biO5N9-MUQk5f2NjTZ6Sw",
-  authDomain: "study-room0826.firebaseapp.com",
-  projectId: "study-room0826",
-  storageBucket: "study-room0826.firebasestorage.app",
-  messagingSenderId: "64330897178",
-  appId: "1:64330897178:web:73e6c42f238de660e63ea3"
+  apiKey: "여기에-본인-apiKey",
+  authDomain: "여기에-본인.firebaseapp.com",
+  projectId: "여기에-본인-projectId",
+  storageBucket: "여기에-본인.appspot.com",
+  messagingSenderId: "여기에-본인-senderId",
+  appId: "여기에-본인-appId",
 };
 
 const fbApp = initializeApp(firebaseConfig);
@@ -27,7 +27,7 @@ const db = getFirestore(fbApp);
 const DOC_REF = doc(db, "studyroom", "shared");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.0-FB";
+const APP_VERSION = "v9.1-FB";
 const LAST_UPDATED = "2026-07-20";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
@@ -98,7 +98,7 @@ const fmtDur = (m) => {
 const todayStartMs = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
 
 const seedProfile = (todos, rewards) => ({
-  points: 0, todos, rewards, purchases: [],
+  points: 0, todos, rewards, purchases: [], usedRewards: {},
   timerActive: null, timerLogs: [],
 });
 
@@ -297,7 +297,7 @@ export default function StudyBuddy() {
 
   // ① 실시간 구독: Firestore 문서가 바뀔 때마다 자동으로 화면 갱신
   useEffect(() => {
-    const norm = (p) => ({ ...p, timerActive: p.timerActive || null, timerLogs: p.timerLogs || [] });
+    const norm = (p) => ({ ...p, timerActive: p.timerActive || null, timerLogs: p.timerLogs || [], purchases: p.purchases || [], usedRewards: p.usedRewards || {} });
     const mergeMasters = (users) => {
       const merged = [...(users || [])];
       MASTERS.forEach((m) => {
@@ -558,6 +558,10 @@ export default function StudyBuddy() {
     return true;
   };
   const buyReward = (reward) => {
+    if (profile.points < reward.cost) {
+      showToast("교환할 포인트가 부족합니다");
+      return false;
+    }
     updateProfile(
       (p) => {
         if (p.points < reward.cost) return p;
@@ -571,6 +575,37 @@ export default function StudyBuddy() {
     );
     logActivity("buy", `${theme.realName}님이 ${reward.cost}포인트를 ${reward.name}(으)로 교환했습니다`);
     showToast(`'${reward.name}' 교환 완료`);
+    return true;
+  };
+
+  // 보유 교환권 사용 처리 (관리자만): 해당 보상 이름의 사용 개수를 1 늘림
+  const useOwnedReward = (rewardName) => {
+    if (!isMaster) { showToast("보유 개수 차감은 부모(관리자)만 가능해요"); return; }
+    updateProfile(
+      (p) => {
+        const purchasedCount = (p.purchases || []).filter((x) => x.name === rewardName).length;
+        const usedCount = (p.usedRewards && p.usedRewards[rewardName]) || 0;
+        if (usedCount >= purchasedCount) return p; // 남은 게 없으면 변화 없음
+        return { ...p, usedRewards: { ...(p.usedRewards || {}), [rewardName]: usedCount + 1 } };
+      },
+      { action: "보상 사용", detail: `"${rewardName}" 1개 사용 처리` }
+    );
+    logActivity("use", `${currentUser.name}님이 ${theme.realName}님의 "${rewardName}" 1개를 사용 처리했습니다`);
+    showToast(`"${rewardName}" 1개 차감했어요`);
+  };
+
+  // 사용 처리 취소(되돌리기): 사용 개수를 1 줄임
+  const undoUsedReward = (rewardName) => {
+    if (!isMaster) return;
+    updateProfile(
+      (p) => {
+        const usedCount = (p.usedRewards && p.usedRewards[rewardName]) || 0;
+        if (usedCount <= 0) return p;
+        return { ...p, usedRewards: { ...(p.usedRewards || {}), [rewardName]: usedCount - 1 } };
+      },
+      { action: "보상 사용 취소", detail: `"${rewardName}" 사용 1개 복구` }
+    );
+    showToast(`"${rewardName}" 1개 복구했어요`);
   };
 
   const startTimer = (subject) => {
@@ -670,7 +705,7 @@ export default function StudyBuddy() {
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
           {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} />}
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
-          {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} />}
+          {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
           {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} />}
         </main>
@@ -1061,7 +1096,7 @@ function ActivityFeed({ theme, activityLog, open, setOpen }) {
 
   const KIND_DOT = {
     start: "bg-sky-400", stop: "bg-emerald-400", done: "bg-amber-400",
-    approve: "bg-violet-400", buy: "bg-rose-400", cancel: "bg-orange-400",
+    approve: "bg-violet-400", buy: "bg-rose-400", cancel: "bg-orange-400", use: "bg-teal-400",
   };
 
   // 날짜별 그룹핑 (펼친 상태에서만 사용)
@@ -1384,9 +1419,9 @@ function TodoItem({ todo, theme, onStudent, onParent, onEdit, onDelete, compact 
 }
 
 // ═══════════ 상점 탭 ═══════════
-function ShopTab({ theme, profile, buyReward, addReward, deleteReward, editReward, isMaster }) {
+function ShopTab({ theme, profile, buyReward, addReward, deleteReward, editReward, isMaster, useOwnedReward, undoUsedReward }) {
   const [view, setView] = useState("shop");
-  if (view === "history") return <PurchaseHistory theme={theme} profile={profile} onBack={() => setView("shop")} />;
+  if (view === "history") return <PurchaseHistory theme={theme} profile={profile} onBack={() => setView("shop")} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />;
   return <ShopMain theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} onHistory={() => setView("history")} />;
 }
 
@@ -1463,9 +1498,12 @@ function ShopMain({ theme, profile, buyReward, addReward, deleteReward, editRewa
                 </div>
               ) : (
                 <>
-                  <button onClick={() => affordable && setConfirmId(r.id)} disabled={!affordable} className={`h-11 px-5 rounded-xl text-sm font-extrabold transition-all active:scale-95 ${
-                    affordable ? `${theme.bg} text-white` : "bg-stone-100 text-stone-400"
-                  }`}>교환</button>
+                  <button
+                    onClick={() => { if (affordable) setConfirmId(r.id); else buyReward(r); }}
+                    className={`h-11 px-5 rounded-xl text-sm font-extrabold transition-all active:scale-95 ${
+                      affordable ? `${theme.bg} text-white` : "bg-stone-100 text-stone-400"
+                    }`}
+                  >교환</button>
                   {isMaster && (
                     <>
                       <button onClick={() => startEdit(r)} className="w-8 h-11 text-stone-400 active:text-stone-700 text-sm">✎</button>
@@ -1503,9 +1541,29 @@ function ShopMain({ theme, profile, buyReward, addReward, deleteReward, editRewa
 }
 
 // ═══════════ 교환 내역 ═══════════
-function PurchaseHistory({ theme, profile, onBack }) {
-  const purchases = profile.purchases;
+function PurchaseHistory({ theme, profile, onBack, isMaster, useOwnedReward, undoUsedReward }) {
+  const purchases = profile.purchases || [];
+  const usedRewards = profile.usedRewards || {};
   const total = purchases.reduce((s, p) => s + p.cost, 0);
+
+  // 보유 교환권: 이름별로 (구매 개수 − 사용 개수) 집계
+  const inventory = useMemo(() => {
+    const map = {};
+    purchases.forEach((p) => {
+      if (!map[p.name]) map[p.name] = { name: p.name, bought: 0, lastAt: p.at, cost: p.cost };
+      map[p.name].bought += 1;
+      if (p.at > map[p.name].lastAt) map[p.name].lastAt = p.at;
+    });
+    return Object.values(map)
+      .map((it) => {
+        const used = usedRewards[it.name] || 0;
+        return { ...it, used, remaining: Math.max(0, it.bought - used) };
+      })
+      .sort((a, b) => b.lastAt - a.lastAt);
+  }, [purchases, usedRewards]);
+
+  const ownedList = inventory.filter((it) => it.remaining > 0);
+
   const groups = useMemo(() => {
     const g = [];
     purchases.forEach((p) => {
@@ -1536,6 +1594,75 @@ function PurchaseHistory({ theme, profile, onBack }) {
         </div>
       </div>
 
+      {/* ── 보유 교환권 ── */}
+      <section className="space-y-2">
+        <SectionLabel accent={theme.bg} right={<span className={`text-[11px] font-bold ${theme.text} tabular-nums`}>{ownedList.reduce((s, it) => s + it.remaining, 0)}개 보유</span>}>
+          보유 교환권
+        </SectionLabel>
+        {ownedList.length === 0 ? (
+          <div className={`${card} p-6 text-center`}>
+            <p className="text-sm text-stone-400">사용 가능한 교환권이 없어요</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {ownedList.map((it) => (
+              <div key={it.name} className={`${card} p-3.5 flex items-center gap-3`}>
+                <div className={`w-10 h-10 rounded-xl ${theme.bgSoft} ${theme.text} flex items-center justify-center text-base shrink-0`}>🎫</div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[15px] font-extrabold text-stone-800 truncate">
+                    {it.name} <span className={theme.text}>× {it.remaining}개</span>
+                  </p>
+                  <p className="text-[11px] text-stone-400 mt-0.5 tabular-nums">
+                    누적 {it.bought}개 교환{it.used > 0 ? ` · ${it.used}개 사용` : ""}
+                  </p>
+                </div>
+                {isMaster ? (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => useOwnedReward(it.name)}
+                      className={`h-9 px-3 rounded-xl ${theme.bg} text-white text-xs font-extrabold active:scale-95`}
+                    >
+                      1개 사용
+                    </button>
+                  </div>
+                ) : (
+                  <span className={`shrink-0 text-lg font-extrabold ${theme.text} tabular-nums`}>{it.remaining}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {isMaster && (
+          <p className="text-[10px] text-stone-400 px-1 leading-relaxed">
+            "1개 사용"을 누르면 보유 개수가 하나 줄어요. 실수했다면 아래 "사용한 교환권"에서 되돌릴 수 있어요.
+          </p>
+        )}
+      </section>
+
+      {/* ── 사용한 교환권 (관리자만, 되돌리기 가능) ── */}
+      {isMaster && inventory.some((it) => it.used > 0) && (
+        <section className="space-y-2">
+          <SectionLabel accent="bg-stone-400">사용한 교환권</SectionLabel>
+          <div className={`${card} divide-y divide-stone-100`}>
+            {inventory.filter((it) => it.used > 0).map((it) => (
+              <div key={it.name} className="flex items-center justify-between px-4 py-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-stone-700 truncate">{it.name}</p>
+                  <p className="text-[11px] text-stone-400 mt-0.5 tabular-nums">{it.used}개 사용 · {it.remaining}개 남음</p>
+                </div>
+                <button
+                  onClick={() => undoUsedReward(it.name)}
+                  className="h-9 px-3 rounded-xl bg-stone-100 text-stone-600 text-xs font-bold active:scale-95 shrink-0"
+                >
+                  1개 되돌리기
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ── 교환 기록 (월별) ── */}
       {purchases.length === 0 ? (
         <div className={`${card} p-10 text-center`}>
           <p className="text-3xl mb-2 opacity-20">🎁</p>
@@ -1862,6 +1989,7 @@ function AdminTab({ data, isMaster, resetUserPw, locations }) {
     "2차 승인": "text-emerald-500", "2차 승인 취소": "text-orange-500",
     "삭제": "text-red-500",
     "보상 추가": "text-violet-500", "보상 삭제": "text-red-500", "보상 교환": "text-pink-500", "보상 수정": "text-amber-500",
+    "보상 사용": "text-teal-500", "보상 사용 취소": "text-orange-500",
     "회원가입": "text-sky-500", "비번 초기화": "text-amber-500",
     "타이머 기록": "text-emerald-500",
   };
