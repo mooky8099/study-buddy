@@ -27,8 +27,9 @@ const db = getFirestore(fbApp);
 const DOC_REF = doc(db, "studyroom", "shared");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.1-FB";
-const LAST_UPDATED = "2026-07-20";
+const APP_VERSION = "v9.2-FB";
+// 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
+const LAST_UPDATED = "2026-07-22";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
   { name: "민지선", pw: "5551" },
@@ -297,7 +298,21 @@ export default function StudyBuddy() {
 
   // ① 실시간 구독: Firestore 문서가 바뀔 때마다 자동으로 화면 갱신
   useEffect(() => {
-    const norm = (p) => ({ ...p, timerActive: p.timerActive || null, timerLogs: p.timerLogs || [], purchases: p.purchases || [], usedRewards: p.usedRewards || {} });
+    // 저장된 프로필에 누락된 키만 기본값으로 채우고, 저장된 값(포인트·할일·보상·구매·사용·타이머 등)은 절대 덮어쓰지 않음
+    const normProfile = (saved, fallback) => {
+      const base = saved || fallback || {};
+      return {
+        points: base.points ?? 0,
+        todos: base.todos ?? [],
+        rewards: base.rewards ?? [],
+        purchases: base.purchases ?? [],
+        usedRewards: base.usedRewards ?? {},
+        timerActive: base.timerActive ?? null,
+        timerLogs: base.timerLogs ?? [],
+        // 미래 버전에서 추가될 수 있는 알 수 없는 필드도 그대로 보존
+        ...base,
+      };
+    };
     const mergeMasters = (users) => {
       const merged = [...(users || [])];
       MASTERS.forEach((m) => {
@@ -313,11 +328,12 @@ export default function StudyBuddy() {
           const parsed = snap.data();
           remoteEcho.current = true; // 이번 setData는 원격발 → 다시 저장하지 않음
           setData((prevLocal) => ({
+            // 기본값을 먼저 깔고, 저장된 값으로 덮어써서 "저장된 내역은 항상 유지 + 새 필드만 보강"
             ...DEFAULT_DATA,
             ...parsed,
-            first: norm(parsed.first || DEFAULT_DATA.first),
-            second: norm(parsed.second || DEFAULT_DATA.second),
-            third: norm(parsed.third || DEFAULT_DATA.third),
+            first: normProfile(parsed.first, DEFAULT_DATA.first),
+            second: normProfile(parsed.second, DEFAULT_DATA.second),
+            third: normProfile(parsed.third, DEFAULT_DATA.third),
             history: parsed.history || [],
             activityLog: parsed.activityLog || [],
             locations: parsed.locations || {},
