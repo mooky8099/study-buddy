@@ -13,12 +13,12 @@ import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
 // ⚠️ 여기에 본인 Firebase 프로젝트 설정을 붙여넣으세요 (가이드 3장 참고)
 //    firebase.google.com → 프로젝트 설정 → "내 앱" → SDK 설정 및 구성 → "구성"
 const firebaseConfig = {
-  apiKey: "여기에-본인-apiKey",
-  authDomain: "여기에-본인.firebaseapp.com",
-  projectId: "여기에-본인-projectId",
-  storageBucket: "여기에-본인.appspot.com",
-  messagingSenderId: "여기에-본인-senderId",
-  appId: "여기에-본인-appId",
+  apiKey: "AIzaSyCM1NYuoGP8L1biO5N9-MUQk5f2NjTZ6Sw",
+  authDomain: "study-room0826.firebaseapp.com",
+  projectId: "study-room0826",
+  storageBucket: "study-room0826.firebasestorage.app",
+  messagingSenderId: "64330897178",
+  appId: "1:64330897178:web:73e6c42f238de660e63ea3"
 };
 
 const fbApp = initializeApp(firebaseConfig);
@@ -26,8 +26,11 @@ const db = getFirestore(fbApp);
 // 온 가족이 같은 문서를 봄: collection "studyroom" 안의 문서 "shared"
 const DOC_REF = doc(db, "studyroom", "shared");
 
+// Firebase 연결 키가 아직 예시값("여기에-...")인지 검사 → 연결 안내를 위해 사용
+const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
+
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.2-FB";
+const APP_VERSION = "v9.3-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-07-22";
 const MASTERS = [
@@ -219,6 +222,7 @@ export default function StudyBuddy() {
   const [kid, setKid] = useState("first");
   const [tab, setTab] = useState("home");
   const [loaded, setLoaded] = useState(false);
+  const [connected, setConnected] = useState(false);
   const [toast, setToast] = useState(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [targetDate, setTargetDate] = useState(() => todayStartMs());
@@ -298,6 +302,12 @@ export default function StudyBuddy() {
 
   // ① 실시간 구독: Firestore 문서가 바뀔 때마다 자동으로 화면 갱신
   useEffect(() => {
+    // Firebase 연결 키가 아직 예시값이면 서버에 접속하지 않고 바로 화면을 띄움 (무한 로딩 방지)
+    if (!FB_CONFIGURED) {
+      setConnected(false);
+      setLoaded(true);
+      return;
+    }
     // 저장된 프로필에 누락된 키만 기본값으로 채우고, 저장된 값(포인트·할일·보상·구매·사용·타이머 등)은 절대 덮어쓰지 않음
     const normProfile = (saved, fallback) => {
       const base = saved || fallback || {};
@@ -346,19 +356,23 @@ export default function StudyBuddy() {
           // 문서가 아직 없으면(처음 실행) 기본 데이터로 최초 생성
           setDoc(DOC_REF, stripSession(DEFAULT_DATA)).catch((e) => console.error("초기 생성 실패:", e));
         }
+        setConnected(true);
         setLoaded(true);
       },
       (err) => {
         console.error("실시간 연결 오류:", err);
+        setConnected(false);
         setLoaded(true); // 오류여도 화면은 띄움(오프라인 등)
       }
     );
-    return () => unsub();
+    // 6초 안에 응답이 없으면 일단 로그인 화면을 띄움 (네트워크 지연 대비)
+    const t = setTimeout(() => setLoaded(true), 6000);
+    return () => { clearTimeout(t); unsub(); };
   }, []);
 
   // ② 로컬 변경을 Firestore에 저장 (원격발 변경은 건너뜀 → 무한루프 방지)
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !FB_CONFIGURED) return;
     if (remoteEcho.current) { remoteEcho.current = false; return; }
     (async () => {
       try { await setDoc(DOC_REF, stripSession(data)); }
@@ -666,7 +680,7 @@ export default function StudyBuddy() {
     );
   }
 
-  if (!currentUser) return <><FontLoader /><AuthScreen login={login} signup={signup} toast={toast} /></>;
+  if (!currentUser) return <><FontLoader /><AuthScreen login={login} signup={signup} toast={toast} connected={connected} /></>;
 
   return (
     <div style={FONT} className="min-h-screen bg-stone-50 text-stone-900">
@@ -778,7 +792,7 @@ const ArrowLeftIcon = () => <svg width="17" height="17" viewBox="0 0 24 24" fill
 const ArrowRightIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12,5 19,12 12,19"/></svg>;
 
 // ═══════════ 로그인 / 회원가입 ═══════════
-function AuthScreen({ login, signup, toast }) {
+function AuthScreen({ login, signup, toast, connected }) {
   const [mode, setMode] = useState("login");
   const [name, setName] = useState("");
   const [pw, setPw] = useState("");
@@ -803,7 +817,23 @@ function AuthScreen({ login, signup, toast }) {
           <div className="w-14 h-14 mx-auto rounded-3xl bg-gradient-to-br from-sky-300 via-rose-300 to-emerald-300 flex items-center justify-center text-2xl shadow-sm">📚</div>
           <h1 className="text-3xl font-extrabold tracking-tight mt-3">우리집 공부방</h1>
           <p className="text-xs font-bold text-stone-400">함께 공부하고 포인트 모으기</p>
+          <div className="flex items-center justify-center gap-1.5 pt-1">
+            <span className={`w-1.5 h-1.5 rounded-full ${FB_CONFIGURED ? (connected ? "bg-emerald-400" : "bg-amber-400") : "bg-red-400"}`}></span>
+            <span className="text-[10px] font-bold text-stone-400">
+              {FB_CONFIGURED ? (connected ? "실시간 서버 연결됨" : "서버 연결 확인 중…") : "서버 미연결 (아래 안내 참고)"}
+            </span>
+          </div>
         </div>
+
+        {!FB_CONFIGURED && (
+          <div className="rounded-2xl border-2 border-red-200 bg-red-50 px-4 py-3">
+            <p className="text-xs font-extrabold text-red-600 mb-1">⚠️ Firebase 연결이 아직 안 됐어요</p>
+            <p className="text-[11px] text-red-500 leading-relaxed">
+              지금은 각 기기에 임시 데이터만 보여, 다른 사람 기기와 내역이 공유되지 않아요.
+              코드 상단 firebaseConfig에 본인 Firebase 연결 키를 넣고 다시 배포하면 실시간 공유가 켜집니다. (배포 가이드 3장 참고)
+            </p>
+          </div>
+        )}
 
         <div className="bg-white rounded-full border border-stone-100 p-1.5 flex gap-1 shadow-sm">
           {[{ id: "login", label: "로그인" }, { id: "signup", label: "회원가입" }].map((m) => (
