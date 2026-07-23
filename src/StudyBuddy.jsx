@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.5-FB";
+const APP_VERSION = "v9.6-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-07-24";
 const MASTERS = [
@@ -647,12 +647,14 @@ export default function StudyBuddy() {
     showToast(`"${rewardName}" 1개 복구했어요`);
   };
 
-  // 특별 포인트: 부모(관리자)가 항목을 체크하면 그날 날짜로 20P 지급, 해제하면 회수
-  const toggleBonus = (itemId) => {
+  // 특별 포인트: 부모(관리자)가 항목을 체크하면 선택한 날짜로 20P 지급, 해제하면 회수
+  const toggleBonus = (itemId, dayMs = todayStartMs()) => {
     if (!isMaster) { showToast("특별 포인트는 부모(관리자)만 줄 수 있어요"); return; }
     const item = BONUS_ITEMS.find((b) => b.id === itemId);
     if (!item) return;
-    const dayMs = todayStartMs();
+    const isTodayPick = isSameDay(dayMs, now());
+    const stampAt = isTodayPick ? now() : dayMs; // 오늘이면 현재시각, 다른 날이면 그 날 자정으로 기록
+    const dayTag = isTodayPick ? "" : `[${new Date(dayMs).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}] `;
     const already = (profile.bonuses || []).some((b) => b.itemId === itemId && isSameDay(b.at, dayMs));
     updateProfile(
       (p) => {
@@ -666,19 +668,19 @@ export default function StudyBuddy() {
         }
         return {
           ...p,
-          bonuses: [{ id: `bn${now()}${Math.random().toString(36).slice(2, 5)}`, itemId, pts: BONUS_PTS, at: now() }, ...list],
+          bonuses: [{ id: `bn${now()}${Math.random().toString(36).slice(2, 5)}`, itemId, pts: BONUS_PTS, at: stampAt }, ...list],
           points: p.points + BONUS_PTS,
         };
       },
       already
-        ? { action: "특별포인트 취소", detail: `"${item.label}" (${BONUS_PTS}P 반납)` }
-        : { action: "특별포인트", detail: `"${item.label}" (+${BONUS_PTS}P 지급)` }
+        ? { action: "특별포인트 취소", detail: `${dayTag}"${item.label}" (${BONUS_PTS}P 반납)` }
+        : { action: "특별포인트", detail: `${dayTag}"${item.label}" (+${BONUS_PTS}P 지급)` }
     );
     logActivity(
       already ? "cancel" : "bonus",
       already
-        ? `${currentUser.name}님이 ${theme.realName}님의 특별포인트 "${item.label}"을(를) 취소했습니다 (${BONUS_PTS}P 반납)`
-        : `${currentUser.name}님이 ${theme.realName}님에게 특별포인트 "${item.label}"을(를) 주었습니다 (+${BONUS_PTS}P)`
+        ? `${currentUser.name}님이 ${theme.realName}님의 ${dayTag}특별포인트 "${item.label}"을(를) 취소했습니다 (${BONUS_PTS}P 반납)`
+        : `${currentUser.name}님이 ${theme.realName}님에게 ${dayTag}특별포인트 "${item.label}"을(를) 주었습니다 (+${BONUS_PTS}P)`
     );
     showToast(already ? `특별포인트 취소 · ${BONUS_PTS}P 반납` : `특별포인트 +${BONUS_PTS}P 지급`);
   };
@@ -778,7 +780,7 @@ export default function StudyBuddy() {
 
         {/* ── 본문 ── */}
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
-          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} />}
+          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} targetDate={targetDate} />}
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
@@ -1040,23 +1042,41 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
 
 // ═══════════ 홈 탭 ═══════════
 // ═══════════ 특별 포인트 패널 ═══════════
-function BonusPanel({ theme, profile, isMaster, toggleBonus }) {
-  const dayMs = todayStartMs();
-  const todayBonuses = (profile.bonuses || []).filter((b) => isSameDay(b.at, dayMs));
-  const isOn = (id) => todayBonuses.some((b) => b.itemId === id);
-  const earned = todayBonuses.length * BONUS_PTS;
+function BonusPanel({ theme, profile, isMaster, toggleBonus, targetDate, setTargetDate }) {
+  const dayMs = targetDate;
+  const isToday = isSameDay(dayMs, now());
+  const d = new Date(dayMs);
+  const dayLabel = isToday
+    ? "오늘"
+    : `${d.getMonth() + 1}.${d.getDate()}(${["일", "월", "화", "수", "목", "금", "토"][d.getDay()]})`;
+  const dayBonuses = (profile.bonuses || []).filter((b) => isSameDay(b.at, dayMs));
+  const isOn = (id) => dayBonuses.some((b) => b.itemId === id);
+  const earned = dayBonuses.length * BONUS_PTS;
 
   return (
     <div className={`${card} px-4 py-3`}>
       <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-xs">✨</span>
-          <span className="text-[11px] font-extrabold text-stone-600">특별 포인트</span>
-          <span className="text-[10px] font-bold text-stone-400">각 +{BONUS_PTS}P</span>
+          <span className="text-[11px] font-extrabold text-stone-600 shrink-0">특별 포인트</span>
+          <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded-md shrink-0 ${theme.bgSoft} ${theme.textDeep}`}>
+            {dayLabel}
+          </span>
+          <span className="text-[10px] font-bold text-stone-400 shrink-0">각 +{BONUS_PTS}P</span>
         </div>
-        {earned > 0 && (
-          <span className={`text-[11px] font-extrabold ${theme.text} tabular-nums`}>오늘 +{earned}P</span>
-        )}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {earned > 0 && (
+            <span className={`text-[11px] font-extrabold ${theme.text} tabular-nums`}>+{earned}P</span>
+          )}
+          {!isToday && (
+            <button
+              onClick={() => setTargetDate(todayStartMs())}
+              className="text-[10px] font-bold text-stone-400 px-1.5 py-0.5 rounded-md bg-stone-100 active:scale-95"
+            >
+              오늘
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="space-y-1">
@@ -1065,7 +1085,7 @@ function BonusPanel({ theme, profile, isMaster, toggleBonus }) {
           return (
             <button
               key={item.id}
-              onClick={() => toggleBonus(item.id)}
+              onClick={() => toggleBonus(item.id, dayMs)}
               className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl transition-all active:scale-[0.99] ${
                 on ? theme.bgSoft : "bg-stone-50"
               }`}
@@ -1093,9 +1113,8 @@ function BonusPanel({ theme, profile, isMaster, toggleBonus }) {
   );
 }
 
-function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc, toggleBonus }) {
+function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc, toggleBonus, targetDate }) {
   const todayIdx = (new Date().getDay() + 6) % 7;
-  const [sel, setSel] = useState(todayIdx);
   const [logOpen, setLogOpen] = useState(false);
 
   const week = useMemo(() => {
@@ -1109,7 +1128,23 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
     });
   }, [profile]);
 
-  const selDay = week[sel];
+  // 선택 날짜는 앱 전체 공용(targetDate) → 달력/특별포인트/할일이 항상 같은 날짜를 바라봄
+  const selDay = useMemo(() => {
+    const ds = targetDate;
+    const d = new Date(ds);
+    const list = profile.todos
+      .filter((t) => isSameDay(t.createdAt, ds))
+      .sort((a, b) => (a.time && b.time ? a.time.localeCompare(b.time) : a.time ? -1 : 1));
+    return {
+      ds,
+      date: d.getDate(),
+      month: d.getMonth() + 1,
+      label: ["일", "월", "화", "수", "목", "금", "토"][d.getDay()],
+      list,
+      done: list.filter((t) => t.done).length,
+    };
+  }, [profile, targetDate]);
+
   const weekTitle = useMemo(() => {
     const f = new Date(week[0].ds);
     const l = new Date(week[6].ds);
@@ -1124,7 +1159,7 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
       <TimerWidget theme={theme} profile={profile} startTimer={startTimer} stopTimer={stopTimer} />
 
       {/* ── 특별 포인트 (부모만 체크 가능) ── */}
-      <BonusPanel theme={theme} profile={profile} isMaster={isMaster} toggleBonus={toggleBonus} />
+      <BonusPanel theme={theme} profile={profile} isMaster={isMaster} toggleBonus={toggleBonus} targetDate={targetDate} setTargetDate={setTargetDate} />
 
       {/* ── 컴팩트 포인트 바 ── */}
       <div className={`${card} p-4 flex items-center justify-between`}>
@@ -1157,13 +1192,13 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
         </SectionLabel>
         <div className="grid grid-cols-7 gap-1 mt-3">
           {week.map((d, i) => {
-            const active = sel === i;
+            const active = isSameDay(d.ds, targetDate);
             const isToday = i === todayIdx;
             const allDone = d.list.length > 0 && d.done === d.list.length;
             return (
               <button
                 key={i}
-                onClick={() => setSel(i)}
+                onClick={() => setTargetDate(d.ds)}
                 className={`h-16 rounded-2xl flex flex-col items-center justify-center gap-0.5 transition-all active:scale-95 ${
                   active ? `${theme.bg} text-white` : isToday ? `bg-white border-2 ${theme.border}` : "bg-stone-50"
                 }`}
