@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.4-FB";
+const APP_VERSION = "v9.5-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-07-24";
 const MASTERS = [
@@ -1328,6 +1328,14 @@ function TodoTab({ theme, profile, toggleStudent, toggleParent, addTodo, editTod
   const targetLabel = `${td.getMonth() + 1}월 ${td.getDate()}일 (${["일","월","화","수","목","금","토"][td.getDay()]})`;
   const targetInputValue = `${td.getFullYear()}-${pad2(td.getMonth() + 1)}-${pad2(td.getDate())}`;
 
+  // 날짜 이동 (달력이 안 열리는 기기에서도 확실히 바꿀 수 있게)
+  const shiftDay = (delta) => {
+    const d = new Date(targetDate);
+    d.setDate(d.getDate() + delta);
+    d.setHours(0, 0, 0, 0);
+    setTargetDate(d.getTime());
+  };
+
   const byTime = (a, b) => {
     if (a.time && b.time) return a.time.localeCompare(b.time);
     if (a.time) return -1;
@@ -1346,10 +1354,23 @@ function TodoTab({ theme, profile, toggleStudent, toggleParent, addTodo, editTod
     <div className="space-y-3.5">
       {/* 등록 날짜 + 추가 폼 통합 */}
       <div className={`${card} p-4 space-y-3.5`}>
-        <div className="flex items-center justify-between">
-          <SectionLabel accent={theme.bg}>할 일 추가</SectionLabel>
-          <label className={`flex items-center gap-1.5 h-8 px-3 rounded-full ${theme.bgSoft} ${theme.textDeep} text-xs font-bold active:scale-95 cursor-pointer`}>
-            📅 {targetLabel}{isToday ? " · 오늘" : ""}
+        <SectionLabel accent={theme.bg}>할 일 추가</SectionLabel>
+
+        {/* 날짜 선택: 달력 탭 + 좌우 화살표로 이동 */}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => shiftDay(-1)}
+            aria-label="이전 날"
+            className="w-9 h-11 shrink-0 rounded-xl bg-stone-100 text-stone-500 text-sm font-extrabold active:scale-95"
+          >
+            ‹
+          </button>
+
+          <div className={`relative flex-1 h-11 rounded-xl ${theme.bgSoft} flex items-center justify-center gap-1.5 px-2`}>
+            <span className="text-sm shrink-0">📅</span>
+            <span className={`text-[13px] font-extrabold ${theme.textDeep} truncate`}>
+              {targetLabel}{isToday ? " · 오늘" : ""}
+            </span>
             <input
               type="date"
               value={targetInputValue}
@@ -1358,9 +1379,27 @@ function TodoTab({ theme, profile, toggleStudent, toggleParent, addTodo, editTod
                 const [y, m, d] = e.target.value.split("-").map(Number);
                 setTargetDate(new Date(y, m - 1, d).getTime());
               }}
-              className="sr-only"
+              onClick={(e) => { if (e.currentTarget.showPicker) { try { e.currentTarget.showPicker(); } catch {} } }}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
             />
-          </label>
+          </div>
+
+          <button
+            onClick={() => shiftDay(1)}
+            aria-label="다음 날"
+            className="w-9 h-11 shrink-0 rounded-xl bg-stone-100 text-stone-500 text-sm font-extrabold active:scale-95"
+          >
+            ›
+          </button>
+
+          {!isToday && (
+            <button
+              onClick={() => setTargetDate(todayStartMs())}
+              className={`h-11 px-3 shrink-0 rounded-xl ${theme.bg} text-white text-xs font-extrabold active:scale-95`}
+            >
+              오늘
+            </button>
+          )}
         </div>
 
         <input
@@ -2278,3 +2317,4 @@ function AdminTab({ data, isMaster, resetUserPw, locations }) {
     </div>
   );
 }
+
