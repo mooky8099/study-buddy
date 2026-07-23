@@ -30,9 +30,9 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.3-FB";
+const APP_VERSION = "v9.4-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
-const LAST_UPDATED = "2026-07-22";
+const LAST_UPDATED = "2026-07-24";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
   { name: "민지선", pw: "5551" },
@@ -51,6 +51,14 @@ const SUBJECTS = [
   { id: "sci", label: "과학", dot: "text-emerald-500" },
   { id: "soc", label: "사회", dot: "text-violet-500" },
   { id: "rev", label: "복습", dot: "text-stone-500" },
+];
+
+// 특별 포인트: 부모(관리자)가 체크하면 그날 20포인트 지급
+const BONUS_PTS = 20;
+const BONUS_ITEMS = [
+  { id: "focus8", label: "혼공시간 8시간 달성", icon: "⏱" },
+  { id: "self", label: "뭐든 스스로 해냅니다", icon: "💪" },
+  { id: "praise", label: "칭찬해주십셔!!", icon: "🎉" },
 ];
 
 // 파스텔 테마: 서준=블루, 주아=레드, 휘=그린
@@ -103,7 +111,7 @@ const todayStartMs = () => { const d = new Date(); d.setHours(0, 0, 0, 0); retur
 
 const seedProfile = (todos, rewards) => ({
   points: 0, todos, rewards, purchases: [], usedRewards: {},
-  timerActive: null, timerLogs: [],
+  timerActive: null, timerLogs: [], bonuses: [],
 });
 
 const middleSchoolSeed = (prefix) => seedProfile(
@@ -319,6 +327,7 @@ export default function StudyBuddy() {
         usedRewards: base.usedRewards ?? {},
         timerActive: base.timerActive ?? null,
         timerLogs: base.timerLogs ?? [],
+        bonuses: base.bonuses ?? [],
         // 미래 버전에서 추가될 수 있는 알 수 없는 필드도 그대로 보존
         ...base,
       };
@@ -638,6 +647,42 @@ export default function StudyBuddy() {
     showToast(`"${rewardName}" 1개 복구했어요`);
   };
 
+  // 특별 포인트: 부모(관리자)가 항목을 체크하면 그날 날짜로 20P 지급, 해제하면 회수
+  const toggleBonus = (itemId) => {
+    if (!isMaster) { showToast("특별 포인트는 부모(관리자)만 줄 수 있어요"); return; }
+    const item = BONUS_ITEMS.find((b) => b.id === itemId);
+    if (!item) return;
+    const dayMs = todayStartMs();
+    const already = (profile.bonuses || []).some((b) => b.itemId === itemId && isSameDay(b.at, dayMs));
+    updateProfile(
+      (p) => {
+        const list = p.bonuses || [];
+        if (already) {
+          return {
+            ...p,
+            bonuses: list.filter((b) => !(b.itemId === itemId && isSameDay(b.at, dayMs))),
+            points: Math.max(0, p.points - BONUS_PTS),
+          };
+        }
+        return {
+          ...p,
+          bonuses: [{ id: `bn${now()}${Math.random().toString(36).slice(2, 5)}`, itemId, pts: BONUS_PTS, at: now() }, ...list],
+          points: p.points + BONUS_PTS,
+        };
+      },
+      already
+        ? { action: "특별포인트 취소", detail: `"${item.label}" (${BONUS_PTS}P 반납)` }
+        : { action: "특별포인트", detail: `"${item.label}" (+${BONUS_PTS}P 지급)` }
+    );
+    logActivity(
+      already ? "cancel" : "bonus",
+      already
+        ? `${currentUser.name}님이 ${theme.realName}님의 특별포인트 "${item.label}"을(를) 취소했습니다 (${BONUS_PTS}P 반납)`
+        : `${currentUser.name}님이 ${theme.realName}님에게 특별포인트 "${item.label}"을(를) 주었습니다 (+${BONUS_PTS}P)`
+    );
+    showToast(already ? `특별포인트 취소 · ${BONUS_PTS}P 반납` : `특별포인트 +${BONUS_PTS}P 지급`);
+  };
+
   const startTimer = (subject) => {
     const subjLabel = SUBJECTS.find((s) => s.id === subject)?.label;
     updateProfile((p) => ({ ...p, timerActive: { subject, startAt: now() } }), null);
@@ -733,7 +778,7 @@ export default function StudyBuddy() {
 
         {/* ── 본문 ── */}
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
-          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} />}
+          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} />}
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
@@ -994,7 +1039,61 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
 }
 
 // ═══════════ 홈 탭 ═══════════
-function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc }) {
+// ═══════════ 특별 포인트 패널 ═══════════
+function BonusPanel({ theme, profile, isMaster, toggleBonus }) {
+  const dayMs = todayStartMs();
+  const todayBonuses = (profile.bonuses || []).filter((b) => isSameDay(b.at, dayMs));
+  const isOn = (id) => todayBonuses.some((b) => b.itemId === id);
+  const earned = todayBonuses.length * BONUS_PTS;
+
+  return (
+    <div className={`${card} px-4 py-3`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs">✨</span>
+          <span className="text-[11px] font-extrabold text-stone-600">특별 포인트</span>
+          <span className="text-[10px] font-bold text-stone-400">각 +{BONUS_PTS}P</span>
+        </div>
+        {earned > 0 && (
+          <span className={`text-[11px] font-extrabold ${theme.text} tabular-nums`}>오늘 +{earned}P</span>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        {BONUS_ITEMS.map((item) => {
+          const on = isOn(item.id);
+          return (
+            <button
+              key={item.id}
+              onClick={() => toggleBonus(item.id)}
+              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl transition-all active:scale-[0.99] ${
+                on ? theme.bgSoft : "bg-stone-50"
+              }`}
+            >
+              <span className="text-[13px] shrink-0">{item.icon}</span>
+              <span className={`flex-1 text-left text-[12px] font-bold truncate ${on ? theme.textDeep : "text-stone-500"}`}>
+                {item.label}
+              </span>
+              <span
+                className={`w-5 h-5 rounded-md shrink-0 flex items-center justify-center text-[11px] font-extrabold border ${
+                  on ? `${theme.bg} border-transparent text-white` : "border-stone-200 bg-white text-transparent"
+                }`}
+              >
+                ✓
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {!isMaster && (
+        <p className="text-[10px] text-stone-400 mt-2 px-0.5">부모님이 체크해 주시면 포인트가 쌓여요</p>
+      )}
+    </div>
+  );
+}
+
+function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc, toggleBonus }) {
   const todayIdx = (new Date().getDay() + 6) % 7;
   const [sel, setSel] = useState(todayIdx);
   const [logOpen, setLogOpen] = useState(false);
@@ -1023,6 +1122,9 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
   return (
     <div className="space-y-3.5">
       <TimerWidget theme={theme} profile={profile} startTimer={startTimer} stopTimer={stopTimer} />
+
+      {/* ── 특별 포인트 (부모만 체크 가능) ── */}
+      <BonusPanel theme={theme} profile={profile} isMaster={isMaster} toggleBonus={toggleBonus} />
 
       {/* ── 컴팩트 포인트 바 ── */}
       <div className={`${card} p-4 flex items-center justify-between`}>
@@ -1142,7 +1244,7 @@ function ActivityFeed({ theme, activityLog, open, setOpen }) {
 
   const KIND_DOT = {
     start: "bg-sky-400", stop: "bg-emerald-400", done: "bg-amber-400",
-    approve: "bg-violet-400", buy: "bg-rose-400", cancel: "bg-orange-400", use: "bg-teal-400",
+    approve: "bg-violet-400", buy: "bg-rose-400", cancel: "bg-orange-400", use: "bg-teal-400", bonus: "bg-fuchsia-400",
   };
 
   // 날짜별 그룹핑 (펼친 상태에서만 사용)
@@ -1233,11 +1335,12 @@ function TodoTab({ theme, profile, toggleStudent, toggleParent, addTodo, editTod
     return b.createdAt - a.createdAt;
   };
 
-  const today = todayStartMs();
-  const todayTodos = profile.todos.filter((t) => isSameDay(t.createdAt, today));
-  const pending = todayTodos.filter((t) => !t.done && !t.studentDone).sort(byTime);
-  const waiting = todayTodos.filter((t) => !t.done && t.studentDone).sort(byTime);
-  const done = todayTodos.filter((t) => t.done);
+  // 선택한 날짜(targetDate)의 할 일을 보여줌 → 내일 이후 등록분도 여기서 수정/삭제 가능
+  const dayTodos = profile.todos.filter((t) => isSameDay(t.createdAt, targetDate));
+  const pending = dayTodos.filter((t) => !t.done && !t.studentDone).sort(byTime);
+  const waiting = dayTodos.filter((t) => !t.done && t.studentDone).sort(byTime);
+  const done = dayTodos.filter((t) => t.done);
+  const dayLabelShort = isToday ? "오늘" : `${td.getMonth() + 1}.${td.getDate()}`;
 
   return (
     <div className="space-y-3.5">
@@ -1333,7 +1436,7 @@ function TodoTab({ theme, profile, toggleStudent, toggleParent, addTodo, editTod
       </div>
 
       <section className="space-y-2">
-        <SectionLabel accent="bg-stone-400">진행 중 · {pending.length}</SectionLabel>
+        <SectionLabel accent="bg-stone-400">{dayLabelShort} 진행 중 · {pending.length}</SectionLabel>
         {pending.length === 0 && <p className="text-stone-400 text-xs py-2">진행 중인 할 일이 없어요.</p>}
         {pending.map((t) => (
           <TodoItem key={t.id} todo={t} theme={theme} onStudent={toggleStudent} onParent={toggleParent} onEdit={editTodo} onDelete={deleteTodo} />
@@ -1342,7 +1445,7 @@ function TodoTab({ theme, profile, toggleStudent, toggleParent, addTodo, editTod
 
       {waiting.length > 0 && (
         <section className="space-y-2">
-          <SectionLabel accent="bg-amber-400">부모 확인 대기 · {waiting.length}</SectionLabel>
+          <SectionLabel accent="bg-amber-400">{dayLabelShort} 부모 확인 대기 · {waiting.length}</SectionLabel>
           {waiting.map((t) => (
             <TodoItem key={t.id} todo={t} theme={theme} onStudent={toggleStudent} onParent={toggleParent} onEdit={editTodo} onDelete={deleteTodo} />
           ))}
@@ -1351,7 +1454,7 @@ function TodoTab({ theme, profile, toggleStudent, toggleParent, addTodo, editTod
 
       {done.length > 0 && (
         <section className="space-y-2">
-          <SectionLabel accent="bg-stone-300">완료 · {done.length}</SectionLabel>
+          <SectionLabel accent="bg-stone-300">{dayLabelShort} 완료 · {done.length}</SectionLabel>
           <div className="bg-stone-100/70 rounded-3xl p-2 space-y-2">
             {done.map((t) => (
               <TodoItem key={t.id} todo={t} theme={theme} onStudent={toggleStudent} onParent={toggleParent} onDelete={deleteTodo} />
@@ -2036,6 +2139,7 @@ function AdminTab({ data, isMaster, resetUserPw, locations }) {
     "삭제": "text-red-500",
     "보상 추가": "text-violet-500", "보상 삭제": "text-red-500", "보상 교환": "text-pink-500", "보상 수정": "text-amber-500",
     "보상 사용": "text-teal-500", "보상 사용 취소": "text-orange-500",
+    "특별포인트": "text-fuchsia-500", "특별포인트 취소": "text-orange-500",
     "회원가입": "text-sky-500", "비번 초기화": "text-amber-500",
     "타이머 기록": "text-emerald-500",
   };
