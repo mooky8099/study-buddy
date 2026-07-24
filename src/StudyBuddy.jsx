@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.6-FB";
+const APP_VERSION = "v9.7-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-07-24";
 const MASTERS = [
@@ -142,6 +142,7 @@ const DEFAULT_DATA = {
   third: middleSchoolSeed("h"),
   history: [],
   activityLog: [],
+  chat: [],
   locations: {},
   users: MASTERS.map((m) => ({ ...m, role: "master", createdAt: now() })),
   loginLogs: [],
@@ -355,6 +356,7 @@ export default function StudyBuddy() {
             third: normProfile(parsed.third, DEFAULT_DATA.third),
             history: parsed.history || [],
             activityLog: parsed.activityLog || [],
+            chat: parsed.chat || [],
             locations: parsed.locations || {},
             loginLogs: parsed.loginLogs || [],
             users: mergeMasters(parsed.users),
@@ -418,6 +420,37 @@ export default function StudyBuddy() {
         ...(prev.activityLog || []),
       ].slice(0, 200),
     }));
+
+  // 한줄 채팅: 온 가족이 같이 쓰는 대화 (최근 100개 보관)
+  const sendChat = (text) => {
+    const msg = (text || "").trim();
+    if (!msg) return false;
+    setData((prev) => ({
+      ...prev,
+      chat: [
+        {
+          id: `c${now()}${Math.random().toString(36).slice(2, 6)}`,
+          at: now(),
+          name: currentUser?.name || "알 수 없음",
+          role: isMaster ? "master" : "student",
+          kidKey: isMaster ? null : activeKid,
+          text: msg.slice(0, 200),
+        },
+        ...(prev.chat || []),
+      ].slice(0, 100),
+    }));
+    return true;
+  };
+
+  // 본인 메시지 또는 부모(관리자)는 삭제 가능
+  const deleteChat = (id) => {
+    setData((prev) => {
+      const target = (prev.chat || []).find((m) => m.id === id);
+      if (!target) return prev;
+      if (!isMaster && target.name !== currentUser?.name) return prev;
+      return { ...prev, chat: (prev.chat || []).filter((m) => m.id !== id) };
+    });
+  };
 
   // 위치 공유: 학생 기기가 자기 위치를 저장 (동의한 경우에만)
   const updateMyLocation = (coords) =>
@@ -780,7 +813,7 @@ export default function StudyBuddy() {
 
         {/* ── 본문 ── */}
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
-          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} targetDate={targetDate} />}
+          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} targetDate={targetDate} chat={data.chat || []} sendChat={sendChat} deleteChat={deleteChat} currentUser={currentUser} />}
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
@@ -1113,7 +1146,7 @@ function BonusPanel({ theme, profile, isMaster, toggleBonus, targetDate, setTarg
   );
 }
 
-function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc, toggleBonus, targetDate }) {
+function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc, toggleBonus, targetDate, chat, sendChat, deleteChat, currentUser }) {
   const todayIdx = (new Date().getDay() + 6) % 7;
   const [logOpen, setLogOpen] = useState(false);
 
@@ -1242,6 +1275,9 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
         </div>
       </div>
 
+      {/* ── 한줄 채팅 ── */}
+      <ChatBox theme={theme} chat={chat} sendChat={sendChat} deleteChat={deleteChat} isMaster={isMaster} currentUser={currentUser} />
+
       {/* ── 공부로그 (온 가족 활동 피드) ── */}
       <ActivityFeed theme={theme} activityLog={activityLog} open={logOpen} setOpen={setLogOpen} />
 
@@ -1268,6 +1304,104 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
       <p className="text-center text-[10px] font-medium text-stone-400 pt-1 pb-2 tabular-nums">
         우리집 공부방 {APP_VERSION} · 최종 수정 {LAST_UPDATED}
       </p>
+    </div>
+  );
+}
+
+// ═══════════ 한줄 채팅 ═══════════
+function ChatBox({ theme, chat, sendChat, deleteChat, isMaster, currentUser }) {
+  const [text, setText] = useState("");
+  const [expanded, setExpanded] = useState(false);
+
+  const messages = chat || [];
+  const shown = expanded ? messages.slice(0, 30) : messages.slice(0, 4);
+
+  const submit = () => {
+    if (!text.trim()) return;
+    if (sendChat(text)) setText("");
+  };
+
+  const relTime = (ms) => {
+    const diff = Math.floor((Date.now() - ms) / 1000);
+    if (diff < 60) return "방금";
+    if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+    return `${Math.floor(diff / 86400)}일 전`;
+  };
+
+  return (
+    <div className={`${card} px-4 py-3`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs">💬</span>
+          <span className="text-[11px] font-extrabold text-stone-600">한줄 채팅</span>
+          {messages.length > 0 && (
+            <span className="text-[10px] font-bold text-stone-400">{messages.length}</span>
+          )}
+        </div>
+        {messages.length > 4 && (
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="text-[10px] font-bold text-stone-400 px-1.5 py-0.5 rounded-md bg-stone-100 active:scale-95"
+          >
+            {expanded ? "접기" : "더보기"}
+          </button>
+        )}
+      </div>
+
+      {/* 메시지 목록 (최신순) */}
+      {messages.length === 0 ? (
+        <p className="text-[11px] text-stone-400 py-2 px-0.5">아직 대화가 없어요. 첫 한마디를 남겨보세요!</p>
+      ) : (
+        <div className={`space-y-1 ${expanded ? "max-h-64 overflow-y-auto" : ""}`}>
+          {shown.map((m) => {
+            const mine = m.name === currentUser?.name;
+            const canDelete = isMaster || mine;
+            return (
+              <div
+                key={m.id}
+                className={`group flex items-start gap-1.5 px-2.5 py-1.5 rounded-xl ${mine ? theme.bgSoft : "bg-stone-50"}`}
+              >
+                <span className={`text-[11px] font-extrabold shrink-0 ${m.role === "master" ? "text-amber-500" : theme.textDeep}`}>
+                  {m.name}
+                </span>
+                <span className="flex-1 min-w-0 text-[12px] font-medium text-stone-700 leading-snug break-words">
+                  {m.text}
+                </span>
+                <span className="text-[9px] text-stone-400 shrink-0 mt-0.5 tabular-nums">{relTime(m.at)}</span>
+                {canDelete && (
+                  <button
+                    onClick={() => deleteChat(m.id)}
+                    aria-label="삭제"
+                    className="text-[10px] text-stone-300 shrink-0 mt-0.5 active:text-red-500"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 한 줄 입력 */}
+      <div className="flex items-center gap-1.5 mt-2">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="한마디 남기기…"
+          maxLength={200}
+          className={`flex-1 h-10 px-3 text-[13px] ${input}`}
+        />
+        <button
+          onClick={submit}
+          disabled={!text.trim()}
+          className={`h-10 px-4 rounded-xl text-white text-xs font-extrabold shrink-0 active:scale-95 disabled:opacity-30 ${theme.bg}`}
+        >
+          전송
+        </button>
+      </div>
     </div>
   );
 }
