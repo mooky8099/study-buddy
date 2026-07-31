@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.8-FB";
+const APP_VERSION = "v9.9-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-07-31";
 const MASTERS = [
@@ -760,6 +760,50 @@ export default function StudyBuddy() {
     showToast(already ? `특별포인트 취소 · ${BONUS_PTS}P 반납` : `특별포인트 +${BONUS_PTS}P 지급`);
   };
 
+  // 관리자: 특정 학생을 지정해 특별 포인트 부여 (현재 선택 프로필과 무관하게 동작)
+  // 포인트·특별포인트기록·변경이력·공부로그를 한 번에 반영
+  const awardBonusToKid = (kidKey, { itemId = null, label, pts }) => {
+    if (!isMaster) { showToast("특별 포인트는 부모(관리자)만 줄 수 있어요"); return false; }
+    const th = THEMES[kidKey];
+    if (!th) return false;
+    const amount = Math.round(Number(pts) || 0);
+    if (!label || !amount) { showToast("항목과 포인트를 확인해 주세요"); return false; }
+    const stamp = now();
+    const actorName = currentUser?.name || "관리자";
+    setData((prev) => {
+      const target = prev[kidKey];
+      if (!target) return prev;
+      // 프리셋(itemId)인데 오늘 이미 지급됐으면 중복 방지
+      if (itemId) {
+        const dup = (target.bonuses || []).some((b) => b.itemId === itemId && isSameDay(b.at, stamp));
+        if (dup) return prev;
+      }
+      const nextProfile = {
+        ...target,
+        points: Math.max(0, (target.points || 0) + amount),
+        bonuses: [{ id: `bn${stamp}${Math.random().toString(36).slice(2, 5)}`, itemId, pts: amount, at: stamp, label }, ...(target.bonuses || [])],
+      };
+      const histEntry = {
+        id: `h${stamp}${Math.random().toString(36).slice(2, 6)}`, at: stamp, actor: actorName,
+        kidKey, action: amount >= 0 ? "특별포인트" : "특별포인트 회수",
+        detail: `"${label}" (${amount >= 0 ? "+" : ""}${amount}P 지급)`,
+      };
+      const actEntry = {
+        id: `a${stamp}${Math.random().toString(36).slice(2, 6)}`, at: stamp, actor: actorName,
+        kidKey, kind: "bonus",
+        text: `${actorName}님이 ${th.realName}님에게 특별포인트 "${label}"을(를) 주었습니다 (${amount >= 0 ? "+" : ""}${amount}P)`,
+      };
+      return {
+        ...prev,
+        [kidKey]: nextProfile,
+        history: [histEntry, ...prev.history].slice(0, 300),
+        activityLog: [actEntry, ...(prev.activityLog || [])].slice(0, 200),
+      };
+    });
+    showToast(`${th.realName} · ${label} ${amount >= 0 ? "+" : ""}${amount}P`);
+    return true;
+  };
+
   const startTimer = (subject) => {
     const subjLabel = SUBJECTS.find((s) => s.id === subject)?.label;
     updateProfile((p) => ({ ...p, timerActive: { subject, startAt: now() } }), null);
@@ -868,7 +912,7 @@ export default function StudyBuddy() {
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
-          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} />}
+          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} />}
         </main>
 
         {toast && (
@@ -2373,8 +2417,142 @@ function LocationView({ locations }) {
   );
 }
 
+// ═══════════ 관리자: 특별 포인트 부여 ═══════════
+function AdminBonus({ data, awardBonusToKid }) {
+  const [kidKey, setKidKey] = useState("first");
+  const [customPts, setCustomPts] = useState("20");
+  const [customReason, setCustomReason] = useState("");
+  const th = THEMES[kidKey];
+
+  const submitPreset = (item) => {
+    awardBonusToKid(kidKey, { itemId: item.id, label: item.label, pts: BONUS_PTS });
+  };
+  const submitCustom = () => {
+    const pts = parseInt(customPts, 10);
+    if (!customReason.trim() || !pts) return;
+    if (awardBonusToKid(kidKey, { itemId: null, label: customReason.trim(), pts })) {
+      setCustomReason("");
+    }
+  };
+
+  // 최근 특별포인트 이력 (선택 학생)
+  const recent = (data.history || [])
+    .filter((h) => h.kidKey === kidKey && (h.action === "특별포인트" || h.action === "특별포인트 취소" || h.action === "특별포인트 회수"))
+    .slice(0, 8);
+
+  const today = todayStartMs();
+  const todayCount = (data[kidKey]?.bonuses || []).filter((b) => isSameDay(b.at, today)).length;
+
+  return (
+    <div className="space-y-3.5">
+      {/* 학생 선택 */}
+      <div className={`${card} p-4 space-y-3`}>
+        <SectionLabel accent={th.bg}>학생 선택</SectionLabel>
+        <div className="flex gap-2">
+          {Object.entries(THEMES).map(([key, t]) => {
+            const on = kidKey === key;
+            return (
+              <button
+                key={key}
+                onClick={() => setKidKey(key)}
+                className={`flex-1 h-14 rounded-2xl flex flex-col items-center justify-center transition-all active:scale-95 ${
+                  on ? `${t.bg} text-white shadow-sm` : "bg-stone-50 border border-stone-100 text-stone-400"
+                }`}
+              >
+                <span className={`text-[10px] font-bold ${on ? "text-white/80" : "text-stone-400"}`}>{t.name}·{t.grade}</span>
+                <span className="text-sm font-extrabold leading-tight mt-0.5">{t.realName}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className={`flex items-center justify-between px-1`}>
+          <span className="text-[11px] font-bold text-stone-500">현재 보유</span>
+          <span className={`text-base font-extrabold ${th.text} tabular-nums`}>{data[kidKey]?.points || 0}P</span>
+        </div>
+        <p className="text-[10px] text-stone-400 px-1">오늘 특별포인트 {todayCount}건 지급됨</p>
+      </div>
+
+      {/* 항목 선택 (프리셋 +20P) */}
+      <div className={`${card} p-4 space-y-2`}>
+        <SectionLabel accent={th.bg}>항목 선택 · 각 +{BONUS_PTS}P</SectionLabel>
+        <div className="space-y-1.5 pt-1">
+          {BONUS_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => submitPreset(item)}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-stone-50 active:scale-[0.99] transition-all"
+            >
+              <span className="text-[15px] shrink-0">{item.icon}</span>
+              <span className="flex-1 text-left text-[13px] font-bold text-stone-600 truncate">{item.label}</span>
+              <span className={`text-xs font-extrabold px-2.5 py-1 rounded-lg ${th.bg} text-white shrink-0`}>+{BONUS_PTS}P</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 직접 입력 */}
+      <div className={`${card} p-4 space-y-2.5`}>
+        <SectionLabel accent={th.bg}>직접 입력</SectionLabel>
+        <input
+          value={customReason}
+          onChange={(e) => setCustomReason(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submitCustom()}
+          placeholder="사유 (예: 심부름 도와줌)"
+          maxLength={40}
+          className={`w-full h-12 px-3.5 text-[14px] ${input}`}
+        />
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1.5 flex-1">
+            {[10, 20, 30, 50].map((v) => (
+              <button
+                key={v}
+                onClick={() => setCustomPts(String(v))}
+                className={`flex-1 h-11 rounded-xl text-sm font-bold transition-all active:scale-95 ${
+                  parseInt(customPts, 10) === v ? `${th.bg} text-white` : "bg-stone-100 text-stone-500"
+                }`}
+              >
+                {v}P
+              </button>
+            ))}
+          </div>
+          <input
+            value={customPts}
+            onChange={(e) => setCustomPts(e.target.value.replace(/[^0-9]/g, ""))}
+            inputMode="numeric"
+            className={`w-16 h-11 text-center text-sm font-bold ${input}`}
+          />
+        </div>
+        <button
+          onClick={submitCustom}
+          disabled={!customReason.trim() || !parseInt(customPts, 10)}
+          className={`w-full h-12 rounded-2xl text-white text-sm font-extrabold transition-all active:scale-95 disabled:opacity-30 ${th.bg}`}
+        >
+          {th.realName}에게 지급하기
+        </button>
+      </div>
+
+      {/* 최근 지급 내역 */}
+      {recent.length > 0 && (
+        <section className="space-y-2">
+          <SectionLabel accent="bg-stone-400">{th.realName} 최근 특별포인트</SectionLabel>
+          <div className={`${card} divide-y divide-stone-100`}>
+            {recent.map((h) => (
+              <div key={h.id} className="flex items-center justify-between px-4 py-2.5">
+                <div className="min-w-0">
+                  <p className="text-[13px] font-bold text-stone-700 truncate">{h.detail}</p>
+                  <p className="text-[10px] text-stone-400 mt-0.5 tabular-nums">{h.actor} · {fmtDateTime(h.at)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
 // ═══════════ 관리자 탭 ═══════════
-function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, importBackup, connected }) {
+function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, importBackup, connected, awardBonusToKid }) {
   const [view, setView] = useState("log");
   const [filter, setFilter] = useState("all");
   const [confirmReset, setConfirmReset] = useState(null);
@@ -2459,8 +2637,8 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
       </div>
 
       <div className={`${card} p-1.5 flex gap-1`}>
-        {[{ id: "log", label: "변경 이력" }, { id: "members", label: "회원 관리" }, { id: "location", label: "위치" }].map((v) => (
-          <button key={v.id} onClick={() => setView(v.id)} className={`flex-1 h-10 rounded-full text-xs font-bold transition-all active:scale-95 ${
+        {[{ id: "log", label: "변경 이력" }, { id: "bonus", label: "특별포인트" }, { id: "members", label: "회원 관리" }, { id: "location", label: "위치" }].map((v) => (
+          <button key={v.id} onClick={() => setView(v.id)} className={`flex-1 h-10 rounded-full text-[11px] font-bold transition-all active:scale-95 ${
             view === v.id ? "bg-stone-800 text-white" : "text-stone-500"
           }`}>{v.label}</button>
         ))}
@@ -2468,6 +2646,8 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
 
       {view === "location" ? (
         <LocationView locations={locations} />
+      ) : view === "bonus" ? (
+        <AdminBonus data={data} awardBonusToKid={awardBonusToKid} />
       ) : view === "members" ? (
         <>
           <section className="space-y-2">
