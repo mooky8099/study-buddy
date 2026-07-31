@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.9-FB";
+const APP_VERSION = "v10.0-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-07-31";
 const MASTERS = [
@@ -804,6 +804,82 @@ export default function StudyBuddy() {
     return true;
   };
 
+  // 관리자: 특정 학생의 포인트 회수(차감). 보유보다 크면 0까지만 회수.
+  const deductPointsFromKid = (kidKey, { reason, pts }) => {
+    if (!isMaster) { showToast("포인트 회수는 부모(관리자)만 할 수 있어요"); return false; }
+    const th = THEMES[kidKey];
+    if (!th) return false;
+    const amount = Math.abs(Math.round(Number(pts) || 0));
+    if (!reason || !amount) { showToast("사유와 포인트를 확인해 주세요"); return false; }
+    const stamp = now();
+    const actorName = currentUser?.name || "관리자";
+    setData((prev) => {
+      const target = prev[kidKey];
+      if (!target) return prev;
+      const before = target.points || 0;
+      const taken = Math.min(before, amount); // 실제 회수된 양(0 밑으로는 안 감)
+      const nextProfile = {
+        ...target,
+        points: Math.max(0, before - amount),
+        bonuses: [{ id: `bn${stamp}${Math.random().toString(36).slice(2, 5)}`, itemId: null, pts: -taken, at: stamp, label: reason }, ...(target.bonuses || [])],
+      };
+      const histEntry = {
+        id: `h${stamp}${Math.random().toString(36).slice(2, 6)}`, at: stamp, actor: actorName,
+        kidKey, action: "포인트 회수", detail: `"${reason}" (-${taken}P 회수)`,
+      };
+      const actEntry = {
+        id: `a${stamp}${Math.random().toString(36).slice(2, 6)}`, at: stamp, actor: actorName,
+        kidKey, kind: "cancel",
+        text: `${actorName}님이 ${th.realName}님의 포인트를 회수했습니다 · "${reason}" (-${taken}P)`,
+      };
+      return {
+        ...prev,
+        [kidKey]: nextProfile,
+        history: [histEntry, ...prev.history].slice(0, 300),
+        activityLog: [actEntry, ...(prev.activityLog || [])].slice(0, 200),
+      };
+    });
+    showToast(`${th.realName} · ${reason} -${amount}P 회수`);
+    return true;
+  };
+
+  // 관리자: 특정 학생의 보유 포인트를 0으로 초기화
+  const resetPointsForKid = (kidKey) => {
+    if (!isMaster) { showToast("포인트 초기화는 부모(관리자)만 할 수 있어요"); return false; }
+    const th = THEMES[kidKey];
+    if (!th) return false;
+    const stamp = now();
+    const actorName = currentUser?.name || "관리자";
+    setData((prev) => {
+      const target = prev[kidKey];
+      if (!target) return prev;
+      const before = target.points || 0;
+      if (before === 0) return prev;
+      const nextProfile = {
+        ...target,
+        points: 0,
+        bonuses: [{ id: `bn${stamp}${Math.random().toString(36).slice(2, 5)}`, itemId: null, pts: -before, at: stamp, label: "포인트 초기화" }, ...(target.bonuses || [])],
+      };
+      const histEntry = {
+        id: `h${stamp}${Math.random().toString(36).slice(2, 6)}`, at: stamp, actor: actorName,
+        kidKey, action: "포인트 초기화", detail: `보유 포인트 ${before}P → 0P`,
+      };
+      const actEntry = {
+        id: `a${stamp}${Math.random().toString(36).slice(2, 6)}`, at: stamp, actor: actorName,
+        kidKey, kind: "cancel",
+        text: `${actorName}님이 ${th.realName}님의 보유 포인트를 초기화했습니다 (${before}P → 0P)`,
+      };
+      return {
+        ...prev,
+        [kidKey]: nextProfile,
+        history: [histEntry, ...prev.history].slice(0, 300),
+        activityLog: [actEntry, ...(prev.activityLog || [])].slice(0, 200),
+      };
+    });
+    showToast(`${th.realName} 포인트를 초기화했어요`);
+    return true;
+  };
+
   const startTimer = (subject) => {
     const subjLabel = SUBJECTS.find((s) => s.id === subject)?.label;
     updateProfile((p) => ({ ...p, timerActive: { subject, startAt: now() } }), null);
@@ -912,7 +988,7 @@ export default function StudyBuddy() {
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
-          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} />}
+          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} deductPointsFromKid={deductPointsFromKid} resetPointsForKid={resetPointsForKid} />}
         </main>
 
         {toast && (
@@ -2418,11 +2494,14 @@ function LocationView({ locations }) {
 }
 
 // ═══════════ 관리자: 특별 포인트 부여 ═══════════
-function AdminBonus({ data, awardBonusToKid }) {
+function AdminBonus({ data, awardBonusToKid, deductPointsFromKid, resetPointsForKid }) {
   const [kidKey, setKidKey] = useState("first");
   const [customPts, setCustomPts] = useState("20");
   const [customReason, setCustomReason] = useState("");
+  const [mode, setMode] = useState("give"); // give=지급, take=회수
+  const [confirmReset, setConfirmReset] = useState(false);
   const th = THEMES[kidKey];
+  const isTake = mode === "take";
 
   const submitPreset = (item) => {
     awardBonusToKid(kidKey, { itemId: item.id, label: item.label, pts: BONUS_PTS });
@@ -2430,14 +2509,18 @@ function AdminBonus({ data, awardBonusToKid }) {
   const submitCustom = () => {
     const pts = parseInt(customPts, 10);
     if (!customReason.trim() || !pts) return;
-    if (awardBonusToKid(kidKey, { itemId: null, label: customReason.trim(), pts })) {
-      setCustomReason("");
-    }
+    const ok = isTake
+      ? deductPointsFromKid(kidKey, { reason: customReason.trim(), pts })
+      : awardBonusToKid(kidKey, { itemId: null, label: customReason.trim(), pts });
+    if (ok) setCustomReason("");
+  };
+  const doReset = () => {
+    if (resetPointsForKid(kidKey)) setConfirmReset(false);
   };
 
-  // 최근 특별포인트 이력 (선택 학생)
+  // 최근 포인트 조정 이력 (선택 학생)
   const recent = (data.history || [])
-    .filter((h) => h.kidKey === kidKey && (h.action === "특별포인트" || h.action === "특별포인트 취소" || h.action === "특별포인트 회수"))
+    .filter((h) => h.kidKey === kidKey && ["특별포인트", "특별포인트 취소", "특별포인트 회수", "포인트 회수", "포인트 초기화"].includes(h.action))
     .slice(0, 8);
 
   const today = todayStartMs();
@@ -2472,32 +2555,46 @@ function AdminBonus({ data, awardBonusToKid }) {
         <p className="text-[10px] text-stone-400 px-1">오늘 특별포인트 {todayCount}건 지급됨</p>
       </div>
 
-      {/* 항목 선택 (프리셋 +20P) */}
-      <div className={`${card} p-4 space-y-2`}>
-        <SectionLabel accent={th.bg}>항목 선택 · 각 +{BONUS_PTS}P</SectionLabel>
-        <div className="space-y-1.5 pt-1">
-          {BONUS_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => submitPreset(item)}
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-stone-50 active:scale-[0.99] transition-all"
-            >
-              <span className="text-[15px] shrink-0">{item.icon}</span>
-              <span className="flex-1 text-left text-[13px] font-bold text-stone-600 truncate">{item.label}</span>
-              <span className={`text-xs font-extrabold px-2.5 py-1 rounded-lg ${th.bg} text-white shrink-0`}>+{BONUS_PTS}P</span>
-            </button>
-          ))}
-        </div>
+      {/* 지급/회수 모드 전환 */}
+      <div className={`${card} p-1.5 flex gap-1`}>
+        <button onClick={() => setMode("give")} className={`flex-1 h-10 rounded-full text-xs font-bold transition-all active:scale-95 ${
+          mode === "give" ? `${th.bg} text-white` : "text-stone-500"
+        }`}>포인트 지급</button>
+        <button onClick={() => setMode("take")} className={`flex-1 h-10 rounded-full text-xs font-bold transition-all active:scale-95 ${
+          mode === "take" ? "bg-orange-500 text-white" : "text-stone-500"
+        }`}>포인트 회수</button>
       </div>
 
-      {/* 직접 입력 */}
+      {/* 항목 선택 (프리셋 +20P) — 지급 모드에서만 */}
+      {!isTake && (
+        <div className={`${card} p-4 space-y-2`}>
+          <SectionLabel accent={th.bg}>항목 선택 · 각 +{BONUS_PTS}P</SectionLabel>
+          <div className="space-y-1.5 pt-1">
+            {BONUS_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => submitPreset(item)}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-stone-50 active:scale-[0.99] transition-all"
+              >
+                <span className="text-[15px] shrink-0">{item.icon}</span>
+                <span className="flex-1 text-left text-[13px] font-bold text-stone-600 truncate">{item.label}</span>
+                <span className={`text-xs font-extrabold px-2.5 py-1 rounded-lg ${th.bg} text-white shrink-0`}>+{BONUS_PTS}P</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 직접 입력 (지급/회수 공용) */}
       <div className={`${card} p-4 space-y-2.5`}>
-        <SectionLabel accent={th.bg}>직접 입력</SectionLabel>
+        <SectionLabel accent={isTake ? "bg-orange-500" : th.bg}>
+          {isTake ? "직접 회수" : "직접 입력"}
+        </SectionLabel>
         <input
           value={customReason}
           onChange={(e) => setCustomReason(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submitCustom()}
-          placeholder="사유 (예: 심부름 도와줌)"
+          placeholder={isTake ? "회수 사유 (예: 약속 안 지킴)" : "사유 (예: 심부름 도와줌)"}
           maxLength={40}
           className={`w-full h-12 px-3.5 text-[14px] ${input}`}
         />
@@ -2508,7 +2605,7 @@ function AdminBonus({ data, awardBonusToKid }) {
                 key={v}
                 onClick={() => setCustomPts(String(v))}
                 className={`flex-1 h-11 rounded-xl text-sm font-bold transition-all active:scale-95 ${
-                  parseInt(customPts, 10) === v ? `${th.bg} text-white` : "bg-stone-100 text-stone-500"
+                  parseInt(customPts, 10) === v ? (isTake ? "bg-orange-500 text-white" : `${th.bg} text-white`) : "bg-stone-100 text-stone-500"
                 }`}
               >
                 {v}P
@@ -2525,16 +2622,44 @@ function AdminBonus({ data, awardBonusToKid }) {
         <button
           onClick={submitCustom}
           disabled={!customReason.trim() || !parseInt(customPts, 10)}
-          className={`w-full h-12 rounded-2xl text-white text-sm font-extrabold transition-all active:scale-95 disabled:opacity-30 ${th.bg}`}
+          className={`w-full h-12 rounded-2xl text-white text-sm font-extrabold transition-all active:scale-95 disabled:opacity-30 ${isTake ? "bg-orange-500" : th.bg}`}
         >
-          {th.realName}에게 지급하기
+          {isTake ? `${th.realName} 포인트 ${parseInt(customPts, 10) || 0}P 회수하기` : `${th.realName}에게 지급하기`}
         </button>
       </div>
+
+      {/* 포인트 초기화 (회수 모드에서만) */}
+      {isTake && (
+        <div className={`${card} p-4 space-y-2.5`}>
+          <SectionLabel accent="bg-red-500">포인트 초기화</SectionLabel>
+          <p className="text-[11px] text-stone-500 leading-snug">
+            {th.realName}님의 보유 포인트({data[kidKey]?.points || 0}P)를 <span className="font-extrabold text-red-500">0P로 초기화</span>합니다. 되돌릴 수 없으니 신중히 사용하세요.
+          </p>
+          {!confirmReset ? (
+            <button
+              onClick={() => setConfirmReset(true)}
+              disabled={(data[kidKey]?.points || 0) === 0}
+              className="w-full h-12 rounded-2xl border-2 border-red-200 text-red-500 text-sm font-extrabold active:scale-95 disabled:opacity-30"
+            >
+              보유 포인트 초기화
+            </button>
+          ) : (
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmReset(false)} className="flex-1 h-12 rounded-2xl bg-stone-100 text-stone-600 text-sm font-extrabold active:scale-95">
+                취소
+              </button>
+              <button onClick={doReset} className="flex-1 h-12 rounded-2xl bg-red-500 text-white text-sm font-extrabold active:scale-95">
+                정말 초기화
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 최근 지급 내역 */}
       {recent.length > 0 && (
         <section className="space-y-2">
-          <SectionLabel accent="bg-stone-400">{th.realName} 최근 특별포인트</SectionLabel>
+          <SectionLabel accent="bg-stone-400">{th.realName} 최근 포인트 조정</SectionLabel>
           <div className={`${card} divide-y divide-stone-100`}>
             {recent.map((h) => (
               <div key={h.id} className="flex items-center justify-between px-4 py-2.5">
@@ -2552,7 +2677,7 @@ function AdminBonus({ data, awardBonusToKid }) {
 }
 
 // ═══════════ 관리자 탭 ═══════════
-function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, importBackup, connected, awardBonusToKid }) {
+function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, importBackup, connected, awardBonusToKid, deductPointsFromKid, resetPointsForKid }) {
   const [view, setView] = useState("log");
   const [filter, setFilter] = useState("all");
   const [confirmReset, setConfirmReset] = useState(null);
@@ -2577,6 +2702,7 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
     "보상 추가": "text-violet-500", "보상 삭제": "text-red-500", "보상 교환": "text-pink-500", "보상 수정": "text-amber-500",
     "보상 사용": "text-teal-500", "보상 사용 취소": "text-orange-500",
     "특별포인트": "text-fuchsia-500", "특별포인트 취소": "text-orange-500",
+    "포인트 회수": "text-orange-500", "특별포인트 회수": "text-orange-500", "포인트 초기화": "text-red-500",
     "회원가입": "text-sky-500", "비번 초기화": "text-amber-500",
     "타이머 기록": "text-emerald-500",
   };
@@ -2647,7 +2773,7 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
       {view === "location" ? (
         <LocationView locations={locations} />
       ) : view === "bonus" ? (
-        <AdminBonus data={data} awardBonusToKid={awardBonusToKid} />
+        <AdminBonus data={data} awardBonusToKid={awardBonusToKid} deductPointsFromKid={deductPointsFromKid} resetPointsForKid={resetPointsForKid} />
       ) : view === "members" ? (
         <>
           <section className="space-y-2">
