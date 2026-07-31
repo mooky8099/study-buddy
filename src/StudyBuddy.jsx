@@ -30,9 +30,9 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v9.7-FB";
+const APP_VERSION = "v9.8-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
-const LAST_UPDATED = "2026-07-24";
+const LAST_UPDATED = "2026-07-31";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
   { name: "민지선", pw: "5551" },
@@ -308,6 +308,8 @@ export default function StudyBuddy() {
 
   // 원격(다른 기기)에서 온 변경인지 표시 → 저장 루프 방지
   const remoteEcho = useRef(false);
+  // 서버에서 실제 데이터를 최소 1번 읽기 전에는 저장 금지 → 초기값으로 덮어쓰는 사고 방지
+  const hydrated = useRef(false);
 
   // ① 실시간 구독: Firestore 문서가 바뀔 때마다 자동으로 화면 갱신
   useEffect(() => {
@@ -363,9 +365,11 @@ export default function StudyBuddy() {
             // 로그인 세션은 기기마다 다름 → 원격값 대신 이 기기 값 유지
             session: prevLocal.session,
           }));
+          hydrated.current = true; // 서버 데이터를 실제로 읽음 → 이제부터 저장 허용
         } else {
-          // 문서가 아직 없으면(처음 실행) 기본 데이터로 최초 생성
+          // 문서가 진짜로 없을 때(최초 1회)만 기본 데이터로 생성. 이후 저장 허용.
           setDoc(DOC_REF, stripSession(DEFAULT_DATA)).catch((e) => console.error("초기 생성 실패:", e));
+          hydrated.current = true;
         }
         setConnected(true);
         setLoaded(true);
@@ -373,17 +377,18 @@ export default function StudyBuddy() {
       (err) => {
         console.error("실시간 연결 오류:", err);
         setConnected(false);
-        setLoaded(true); // 오류여도 화면은 띄움(오프라인 등)
+        setLoaded(true); // 화면은 띄우되, hydrated는 그대로 false → 저장은 막힘(서버 보호)
       }
     );
-    // 6초 안에 응답이 없으면 일단 로그인 화면을 띄움 (네트워크 지연 대비)
+    // 6초 안에 응답이 없으면 화면만 띄움. hydrated는 false로 두어 저장은 계속 막음(서버 보호)
     const t = setTimeout(() => setLoaded(true), 6000);
     return () => { clearTimeout(t); unsub(); };
   }, []);
 
-  // ② 로컬 변경을 Firestore에 저장 (원격발 변경은 건너뜀 → 무한루프 방지)
+  // ② 로컬 변경을 Firestore에 저장 (서버를 실제로 읽기 전에는 절대 저장하지 않음)
   useEffect(() => {
     if (!loaded || !FB_CONFIGURED) return;
+    if (!hydrated.current) return; // ★ 서버 데이터를 읽기 전에는 저장 금지 → 초기화 사고 방지
     if (remoteEcho.current) { remoteEcho.current = false; return; }
     (async () => {
       try { await setDoc(DOC_REF, stripSession(data)); }
@@ -450,6 +455,43 @@ export default function StudyBuddy() {
       if (!isMaster && target.name !== currentUser?.name) return prev;
       return { ...prev, chat: (prev.chat || []).filter((m) => m.id !== id) };
     });
+  };
+
+  // 데이터 백업: 현재 데이터를 JSON 파일로 내려받기 (부모만)
+  const exportBackup = () => {
+    if (!isMaster) return;
+    try {
+      const payload = JSON.stringify({ _backup: "studybuddy", version: APP_VERSION, at: now(), data: stripSession(data) }, null, 2);
+      const blob = new Blob([payload], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const d = new Date();
+      a.href = url;
+      a.download = `공부방백업_${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast("백업 파일을 저장했어요");
+    } catch (e) { showToast("백업 저장에 실패했어요"); }
+  };
+
+  // 데이터 백업 불러오기: 파일에서 복원 → 서버에도 반영 (부모만)
+  const importBackup = (file) => {
+    if (!isMaster || !file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        const restored = parsed && parsed.data ? parsed.data : parsed;
+        if (!restored || !restored.first || !restored.users) { showToast("백업 파일 형식이 올바르지 않아요"); return; }
+        if (!window.confirm("지금 데이터를 이 백업으로 덮어씁니다. 계속할까요?")) return;
+        remoteEcho.current = false; // 로컬 변경으로 처리 → 서버에 저장되게
+        setData((prev) => ({ ...restored, session: prev.session }));
+        showToast("백업을 불러왔어요");
+      } catch (e) { showToast("백업 파일을 읽지 못했어요"); }
+    };
+    reader.readAsText(file);
   };
 
   // 위치 공유: 학생 기기가 자기 위치를 저장 (동의한 경우에만)
@@ -813,11 +855,20 @@ export default function StudyBuddy() {
 
         {/* ── 본문 ── */}
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
+          {FB_CONFIGURED && !connected && (
+            <div className="mb-3 rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-2.5 flex items-start gap-2">
+              <span className="text-sm shrink-0 mt-0.5">⚠️</span>
+              <p className="text-[11px] font-bold text-amber-700 leading-snug">
+                서버에 연결되지 않았어요. 지금 화면은 임시 데이터일 수 있어요.
+                <span className="font-extrabold"> 연결이 초록으로 바뀌기 전에는 새로 입력·수정하지 마세요.</span> (덮어쓰기 방지 중)
+              </p>
+            </div>
+          )}
           {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} targetDate={targetDate} chat={data.chat || []} sendChat={sendChat} deleteChat={deleteChat} currentUser={currentUser} />}
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
-          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} />}
+          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} />}
         </main>
 
         {toast && (
@@ -2323,7 +2374,7 @@ function LocationView({ locations }) {
 }
 
 // ═══════════ 관리자 탭 ═══════════
-function AdminTab({ data, isMaster, resetUserPw, locations }) {
+function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, importBackup, connected }) {
   const [view, setView] = useState("log");
   const [filter, setFilter] = useState("all");
   const [confirmReset, setConfirmReset] = useState(null);
@@ -2376,6 +2427,35 @@ function AdminTab({ data, isMaster, resetUserPw, locations }) {
             <p className="text-base font-extrabold text-stone-800">부모 콘솔</p>
           </div>
         </div>
+        <div className="flex items-center gap-1.5">
+          <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-emerald-400" : "bg-red-400"}`}></span>
+          <span className="text-[10px] font-bold text-stone-400">{connected ? "연결됨" : "미연결"}</span>
+        </div>
+      </div>
+
+      {/* ── 데이터 백업 ── */}
+      <div className={`${card} p-4 space-y-2.5`}>
+        <SectionLabel accent="bg-emerald-400" right={<span className="text-[10px] font-bold text-stone-400">권장: 가끔 저장</span>}>데이터 백업</SectionLabel>
+        <p className="text-[11px] text-stone-500 leading-snug">
+          현재 데이터를 파일로 내려받아 두면, 혹시 초기화되더라도 되돌릴 수 있어요.
+        </p>
+        <div className="flex gap-2">
+          <button onClick={exportBackup} className="flex-1 h-11 rounded-xl bg-stone-800 text-white text-xs font-extrabold active:scale-95">
+            백업 내보내기
+          </button>
+          <label className="flex-1 h-11 rounded-xl bg-stone-100 text-stone-700 text-xs font-extrabold flex items-center justify-center active:scale-95 cursor-pointer">
+            백업 불러오기
+            <input
+              type="file"
+              accept="application/json,.json"
+              onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) importBackup(f); e.target.value = ""; }}
+              className="hidden"
+            />
+          </label>
+        </div>
+        <p className="text-[10px] text-stone-400 leading-snug">
+          ※ 불러오기는 현재 데이터를 백업 파일 내용으로 덮어씁니다(서버에도 반영). 연결이 "연결됨"일 때만 진행하세요.
+        </p>
       </div>
 
       <div className={`${card} p-1.5 flex gap-1`}>
@@ -2486,4 +2566,3 @@ function AdminTab({ data, isMaster, resetUserPw, locations }) {
     </div>
   );
 }
-
