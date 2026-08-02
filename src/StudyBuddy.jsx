@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.1-FB";
+const APP_VERSION = "v10.2-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-08-02";
 const MASTERS = [
@@ -87,15 +87,25 @@ const now = () => Date.now();
 // 로그인 세션은 기기마다 다르므로 Firestore에는 저장하지 않음
 const stripSession = (d) => { const { session, ...rest } = d; return rest; };
 
+// 데이터가 "사실상 비어 있는 초기 상태"인지 판별 (덮어쓰기 사고 방지용 공용 함수)
+const looksEmptyData = (d) => {
+  if (!d) return true;
+  const noLogs = (d.history || []).length === 0 && (d.activityLog || []).length === 0;
+  const noKidData = ["first", "second", "third"].every((k) => {
+    const p = d[k] || {};
+    return (p.points || 0) === 0
+      && (p.purchases || []).length === 0
+      && (p.bonuses || []).length === 0
+      && (p.timerLogs || []).length === 0;
+  });
+  return noLogs && noKidData;
+};
+
 // 이 기기에 마지막 정상(서버 확인) 데이터를 안전 사본으로 보관 → 사고 시 복구용
 const SAFETY_KEY = "studybuddy-safety";
 const saveLocalSafety = (parsed) => {
   try {
-    const hasContent =
-      (parsed.history || []).length > 0 ||
-      (parsed.activityLog || []).length > 0 ||
-      ["first", "second", "third"].some((k) => (parsed[k]?.points || 0) > 0 || (parsed[k]?.purchases || []).length > 0);
-    if (!hasContent) return; // 빈 데이터는 사본으로 남기지 않음
+    if (looksEmptyData(parsed)) return; // 빈 데이터는 사본으로 남기지 않음
     localStorage.setItem(SAFETY_KEY, JSON.stringify({ at: Date.now(), data: parsed }));
   } catch (e) { /* 저장공간 부족 등은 무시 */ }
 };
@@ -252,6 +262,8 @@ export default function StudyBuddy() {
   const [loaded, setLoaded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [ruleError, setRuleError] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const [saveBlocked, setSaveBlocked] = useState(false);
   const [toast, setToast] = useState(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [targetDate, setTargetDate] = useState(() => todayStartMs());
@@ -330,6 +342,10 @@ export default function StudyBuddy() {
   const remoteEcho = useRef(false);
   // 서버에서 실제 데이터를 최소 1번 읽기 전에는 저장 금지 → 초기값으로 덮어쓰는 사고 방지
   const hydrated = useRef(false);
+  // 서버에 실제 내용이 있었는지 기억 (빈 데이터로 덮어쓰기 차단용)
+  const sawServerData = useRef(false);
+  // 저장 디바운스 타이머
+  const saveTimer = useRef(null);
 
   // ① 실시간 구독: Firestore 문서가 바뀔 때마다 자동으로 화면 갱신
   useEffect(() => {
@@ -371,6 +387,7 @@ export default function StudyBuddy() {
         //   오프라인/최초접속 시 캐시가 비어 있으면 서버에 데이터가 있어도 exists()=false 가 됨.
         //   이때 기본값을 쓰면 서버 데이터가 통째로 날아감 → 반드시 서버 확인분만 신뢰한다.
         const fromCache = snap.metadata.fromCache;
+        const pending = snap.metadata.hasPendingWrites; // 내가 방금 쓴 값의 즉시 반영분
 
         if (snap.exists()) {
           const parsed = snap.data();
@@ -393,14 +410,23 @@ export default function StudyBuddy() {
           }));
           if (!fromCache) {
             hydrated.current = true; // 서버가 확인해 준 데이터를 읽음 → 이제부터 저장 허용
-            saveLocalSafety(parsed); // 마지막 정상 데이터를 이 기기에 안전 사본으로 보관
+            if (!looksEmptyData(parsed)) {
+              sawServerData.current = true; // 서버에 실제 내용이 있었음 (빈 데이터 덮어쓰기 차단용)
+              saveLocalSafety(parsed);      // 마지막 정상 데이터를 이 기기에 안전 사본으로 보관
+            }
+          } else if (!pending) {
+            // ★ 서버와 동기화가 끊긴 상태(오프라인/절전 복귀 직후).
+            //   이때 화면의 오래된 상태로 저장하면 최신 서버 데이터를 덮어씀 → 저장 차단.
+            hydrated.current = false;
           }
         } else if (!fromCache) {
           // 서버가 "문서 없음"을 확인해 준 경우에만 최초 생성 (진짜 첫 실행)
           setDoc(DOC_REF, stripSession(DEFAULT_DATA)).catch((e) => console.error("초기 생성 실패:", e));
           hydrated.current = true;
+        } else {
+          // 캐시발 "문서 없음" → 아직 서버 응답 전일 뿐. 아무것도 하지 않고 저장도 막는다.
+          hydrated.current = false;
         }
-        // else: 캐시발 "문서 없음" → 아직 서버 응답 전일 뿐이므로 아무것도 하지 않음(가장 중요)
 
         setConnected(!fromCache);
         setLoaded(true);
@@ -422,13 +448,37 @@ export default function StudyBuddy() {
   // ② 로컬 변경을 Firestore에 저장 (서버를 실제로 읽기 전에는 절대 저장하지 않음)
   useEffect(() => {
     if (!loaded || !FB_CONFIGURED) return;
-    if (!hydrated.current) return; // ★ 서버 데이터를 읽기 전에는 저장 금지 → 초기화 사고 방지
+    if (!hydrated.current) return; // ★ 서버와 동기화된 상태가 아니면 저장 금지
     if (remoteEcho.current) { remoteEcho.current = false; return; }
-    (async () => {
-      try { await setDoc(DOC_REF, stripSession(data)); }
-      catch (e) { console.error("저장 실패:", e); }
-    })();
+    // ★ 최후의 안전벨트: 서버에 내용이 있었는데 지금 보낼 데이터가 텅 비었으면 저장을 거부한다.
+    if (sawServerData.current && looksEmptyData(data)) {
+      console.warn("빈 데이터로 덮어쓰려는 저장을 차단했습니다.");
+      setSaveBlocked(true);
+      return;
+    }
+    // 연속 변경을 모아서 한 번만 저장 (쓰기 폭주 방지)
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await setDoc(DOC_REF, stripSession(data));
+        setSaveError(false);
+      } catch (e) {
+        console.error("저장 실패:", e);
+        setSaveError(true);
+      }
+    }, 600);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
   }, [data, loaded]);
+
+  // 화면 복귀(절전 해제/탭 전환) 시에는 서버 재확인 전까지 저장을 막는다.
+  // 오래된 화면 상태가 최신 서버 데이터를 덮어쓰는 사고를 막기 위함.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") hydrated.current = false;
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -521,12 +571,18 @@ export default function StudyBuddy() {
         if (!restored || !restored.first || !restored.users) { showToast("백업 파일 형식이 올바르지 않아요"); return; }
         if (!window.confirm("지금 데이터를 이 백업으로 덮어씁니다. 계속할까요?")) return;
         remoteEcho.current = false; // 로컬 변경으로 처리 → 서버에 저장되게
-        setData((prev) => ({ ...restored, session: prev.session }));
+        hydrated.current = true;    // 사용자가 명시적으로 복구를 지시함
+        sawServerData.current = false; // 복구본 기준으로 다시 판단
+        setSaveBlocked(false);
+        setData((prev) => ({ ...DEFAULT_DATA, ...restored, session: prev.session }));
         showToast("백업을 불러왔어요");
       } catch (e) { showToast("백업 파일을 읽지 못했어요"); }
     };
     reader.readAsText(file);
   };
+
+  // 관리자 화면에서 보여줄 안전 사본 정보 (렌더마다 읽지 않도록 메모)
+  const safetySnap = useMemo(() => readLocalSafety(), [loaded, tab, data]);
 
   // 이 기기에 보관된 마지막 정상 데이터로 복구 (사고 직후 구제용)
   const restoreFromSafety = () => {
@@ -537,6 +593,8 @@ export default function StudyBuddy() {
     if (!window.confirm(`이 기기에 보관된 ${when} 시점 데이터로 되돌립니다. 계속할까요?`)) return;
     remoteEcho.current = false;
     hydrated.current = true; // 사용자가 명시적으로 복구를 지시함
+    sawServerData.current = false; // 복구본 기준으로 다시 판단
+    setSaveBlocked(false);
     setData((prev) => ({ ...DEFAULT_DATA, ...snap.data, session: prev.session }));
     showToast("사본으로 복구했어요");
   };
@@ -1022,6 +1080,23 @@ export default function StudyBuddy() {
 
         {/* ── 본문 ── */}
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
+          {FB_CONFIGURED && saveBlocked && (
+            <div className="mb-3 rounded-2xl border-2 border-red-300 bg-red-50 px-4 py-2.5 flex items-start gap-2">
+              <span className="text-sm shrink-0 mt-0.5">🛡️</span>
+              <p className="text-[11px] font-bold text-red-700 leading-snug">
+                데이터가 비어 보여서 <span className="font-extrabold">저장을 차단</span>했어요. 서버 데이터는 지켜졌습니다.
+                앱을 완전히 껐다 다시 열어 주세요. 계속되면 관리자 → 백업에서 사본으로 복구하세요.
+              </p>
+            </div>
+          )}
+          {FB_CONFIGURED && saveError && !saveBlocked && (
+            <div className="mb-3 rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-2.5 flex items-start gap-2">
+              <span className="text-sm shrink-0 mt-0.5">⚠️</span>
+              <p className="text-[11px] font-bold text-amber-700 leading-snug">
+                저장에 실패했어요. 방금 변경한 내용이 서버에 반영되지 않았을 수 있어요. 연결 상태를 확인해 주세요.
+              </p>
+            </div>
+          )}
           {FB_CONFIGURED && ruleError && (
             <div className="mb-3 rounded-2xl border-2 border-red-300 bg-red-50 px-4 py-2.5 flex items-start gap-2">
               <span className="text-sm shrink-0 mt-0.5">🔒</span>
@@ -1044,7 +1119,7 @@ export default function StudyBuddy() {
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
-          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} deductPointsFromKid={deductPointsFromKid} resetPointsForKid={resetPointsForKid} restoreFromSafety={restoreFromSafety} safetySnap={readLocalSafety()} />}
+          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} deductPointsFromKid={deductPointsFromKid} resetPointsForKid={resetPointsForKid} restoreFromSafety={restoreFromSafety} safetySnap={safetySnap} />}
         </main>
 
         {toast && (
