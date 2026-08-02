@@ -30,9 +30,9 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.0-FB";
+const APP_VERSION = "v10.1-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
-const LAST_UPDATED = "2026-07-31";
+const LAST_UPDATED = "2026-08-02";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
   { name: "민지선", pw: "5551" },
@@ -86,6 +86,25 @@ const THEMES = {
 const now = () => Date.now();
 // 로그인 세션은 기기마다 다르므로 Firestore에는 저장하지 않음
 const stripSession = (d) => { const { session, ...rest } = d; return rest; };
+
+// 이 기기에 마지막 정상(서버 확인) 데이터를 안전 사본으로 보관 → 사고 시 복구용
+const SAFETY_KEY = "studybuddy-safety";
+const saveLocalSafety = (parsed) => {
+  try {
+    const hasContent =
+      (parsed.history || []).length > 0 ||
+      (parsed.activityLog || []).length > 0 ||
+      ["first", "second", "third"].some((k) => (parsed[k]?.points || 0) > 0 || (parsed[k]?.purchases || []).length > 0);
+    if (!hasContent) return; // 빈 데이터는 사본으로 남기지 않음
+    localStorage.setItem(SAFETY_KEY, JSON.stringify({ at: Date.now(), data: parsed }));
+  } catch (e) { /* 저장공간 부족 등은 무시 */ }
+};
+const readLocalSafety = () => {
+  try {
+    const raw = localStorage.getItem(SAFETY_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+};
 const isSameDay = (a, b) => {
   const da = new Date(a), db = new Date(b);
   return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
@@ -232,6 +251,7 @@ export default function StudyBuddy() {
   const [tab, setTab] = useState("home");
   const [loaded, setLoaded] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [ruleError, setRuleError] = useState(false);
   const [toast, setToast] = useState(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [targetDate, setTargetDate] = useState(() => todayStartMs());
@@ -345,7 +365,13 @@ export default function StudyBuddy() {
 
     const unsub = onSnapshot(
       DOC_REF,
+      { includeMetadataChanges: true },
       (snap) => {
+        // ★ 핵심: 캐시에서 온 스냅샷인지 구분.
+        //   오프라인/최초접속 시 캐시가 비어 있으면 서버에 데이터가 있어도 exists()=false 가 됨.
+        //   이때 기본값을 쓰면 서버 데이터가 통째로 날아감 → 반드시 서버 확인분만 신뢰한다.
+        const fromCache = snap.metadata.fromCache;
+
         if (snap.exists()) {
           const parsed = snap.data();
           remoteEcho.current = true; // 이번 setData는 원격발 → 다시 저장하지 않음
@@ -365,17 +391,25 @@ export default function StudyBuddy() {
             // 로그인 세션은 기기마다 다름 → 원격값 대신 이 기기 값 유지
             session: prevLocal.session,
           }));
-          hydrated.current = true; // 서버 데이터를 실제로 읽음 → 이제부터 저장 허용
-        } else {
-          // 문서가 진짜로 없을 때(최초 1회)만 기본 데이터로 생성. 이후 저장 허용.
+          if (!fromCache) {
+            hydrated.current = true; // 서버가 확인해 준 데이터를 읽음 → 이제부터 저장 허용
+            saveLocalSafety(parsed); // 마지막 정상 데이터를 이 기기에 안전 사본으로 보관
+          }
+        } else if (!fromCache) {
+          // 서버가 "문서 없음"을 확인해 준 경우에만 최초 생성 (진짜 첫 실행)
           setDoc(DOC_REF, stripSession(DEFAULT_DATA)).catch((e) => console.error("초기 생성 실패:", e));
           hydrated.current = true;
         }
-        setConnected(true);
+        // else: 캐시발 "문서 없음" → 아직 서버 응답 전일 뿐이므로 아무것도 하지 않음(가장 중요)
+
+        setConnected(!fromCache);
         setLoaded(true);
       },
       (err) => {
         console.error("실시간 연결 오류:", err);
+        if (err && err.code === "permission-denied") {
+          setRuleError(true); // 보안 규칙 만료/차단 → 안내 표시
+        }
         setConnected(false);
         setLoaded(true); // 화면은 띄우되, hydrated는 그대로 false → 저장은 막힘(서버 보호)
       }
@@ -492,6 +526,19 @@ export default function StudyBuddy() {
       } catch (e) { showToast("백업 파일을 읽지 못했어요"); }
     };
     reader.readAsText(file);
+  };
+
+  // 이 기기에 보관된 마지막 정상 데이터로 복구 (사고 직후 구제용)
+  const restoreFromSafety = () => {
+    if (!isMaster) return;
+    const snap = readLocalSafety();
+    if (!snap || !snap.data) { showToast("이 기기에 보관된 사본이 없어요"); return; }
+    const when = new Date(snap.at).toLocaleString("ko-KR");
+    if (!window.confirm(`이 기기에 보관된 ${when} 시점 데이터로 되돌립니다. 계속할까요?`)) return;
+    remoteEcho.current = false;
+    hydrated.current = true; // 사용자가 명시적으로 복구를 지시함
+    setData((prev) => ({ ...DEFAULT_DATA, ...snap.data, session: prev.session }));
+    showToast("사본으로 복구했어요");
   };
 
   // 위치 공유: 학생 기기가 자기 위치를 저장 (동의한 경우에만)
@@ -975,7 +1022,16 @@ export default function StudyBuddy() {
 
         {/* ── 본문 ── */}
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
-          {FB_CONFIGURED && !connected && (
+          {FB_CONFIGURED && ruleError && (
+            <div className="mb-3 rounded-2xl border-2 border-red-300 bg-red-50 px-4 py-2.5 flex items-start gap-2">
+              <span className="text-sm shrink-0 mt-0.5">🔒</span>
+              <p className="text-[11px] font-bold text-red-700 leading-snug">
+                서버 접근이 거부됐어요(보안 규칙). Firestore "테스트 모드"는 30일 뒤 자동 차단됩니다.
+                <span className="font-extrabold"> 배포 가이드 4장의 보안 규칙을 다시 게시</span>해 주세요.
+              </p>
+            </div>
+          )}
+          {FB_CONFIGURED && !connected && !ruleError && (
             <div className="mb-3 rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-2.5 flex items-start gap-2">
               <span className="text-sm shrink-0 mt-0.5">⚠️</span>
               <p className="text-[11px] font-bold text-amber-700 leading-snug">
@@ -988,7 +1044,7 @@ export default function StudyBuddy() {
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
-          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} deductPointsFromKid={deductPointsFromKid} resetPointsForKid={resetPointsForKid} />}
+          {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} deductPointsFromKid={deductPointsFromKid} resetPointsForKid={resetPointsForKid} restoreFromSafety={restoreFromSafety} safetySnap={readLocalSafety()} />}
         </main>
 
         {toast && (
@@ -2677,7 +2733,7 @@ function AdminBonus({ data, awardBonusToKid, deductPointsFromKid, resetPointsFor
 }
 
 // ═══════════ 관리자 탭 ═══════════
-function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, importBackup, connected, awardBonusToKid, deductPointsFromKid, resetPointsForKid }) {
+function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, importBackup, connected, awardBonusToKid, deductPointsFromKid, resetPointsForKid, restoreFromSafety, safetySnap }) {
   const [view, setView] = useState("log");
   const [filter, setFilter] = useState("all");
   const [confirmReset, setConfirmReset] = useState(null);
@@ -2760,6 +2816,19 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
         <p className="text-[10px] text-stone-400 leading-snug">
           ※ 불러오기는 현재 데이터를 백업 파일 내용으로 덮어씁니다(서버에도 반영). 연결이 "연결됨"일 때만 진행하세요.
         </p>
+        {safetySnap && (
+          <div className="pt-1 border-t border-stone-100 space-y-1.5">
+            <p className="text-[11px] font-bold text-stone-500">
+              이 기기 자동 사본 · {new Date(safetySnap.at).toLocaleString("ko-KR")}
+            </p>
+            <button onClick={restoreFromSafety} className="w-full h-11 rounded-xl border-2 border-emerald-200 text-emerald-600 text-xs font-extrabold active:scale-95">
+              이 기기 사본으로 되돌리기
+            </button>
+            <p className="text-[10px] text-stone-400 leading-snug">
+              앱이 서버에서 정상 데이터를 읽을 때마다 이 기기에 자동으로 사본을 남겨둡니다.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className={`${card} p-1.5 flex gap-1`}>
@@ -2872,3 +2941,4 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
     </div>
   );
 }
+
