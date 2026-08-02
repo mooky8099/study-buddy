@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.2-FB";
+const APP_VERSION = "v10.3-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-08-02";
 const MASTERS = [
@@ -52,6 +52,9 @@ const SUBJECTS = [
   { id: "soc", label: "사회", dot: "text-violet-500" },
   { id: "rev", label: "복습", dot: "text-stone-500" },
 ];
+
+// 혼공 누적 목표 시간 (시간 단위)
+const STUDY_GOAL_HOURS = 5840;
 
 // 특별 포인트: 부모(관리자)가 체크하면 그날 20포인트 지급
 const BONUS_PTS = 20;
@@ -1311,6 +1314,12 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
   const runningMin = active ? Math.floor(elapsed / 60) : 0;
   const projectedTotal = totalMin + runningMin;
 
+  // 전체 누적 혼공시간 (기록 전체 + 진행 중인 타이머)
+  const lifetimeMin = (profile.timerLogs || []).reduce((sum, l) => sum + l.minutes, 0) + runningMin;
+  const lifetimeHours = lifetimeMin / 60;
+  const goalPct = Math.min(100, (lifetimeHours / STUDY_GOAL_HOURS) * 100);
+  const fmtHours = (h) => (h >= 100 ? Math.round(h).toLocaleString() : h.toFixed(1));
+
   const fmtElapsed = (sec) => `${pad2(Math.floor(sec / 3600))}:${pad2(Math.floor((sec % 3600) / 60))}:${pad2(sec % 60)}`;
 
   return (
@@ -1333,6 +1342,26 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
             종료
           </button>
         )}
+      </div>
+
+      {/* 혼공 누적 목표 달성 현황 */}
+      <div className="mt-2.5 pt-2.5 border-t border-stone-100">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-[10px] font-bold text-stone-400 shrink-0">
+            혼공목표 {STUDY_GOAL_HOURS.toLocaleString()}시간
+          </span>
+          <span className="text-[11px] font-bold text-stone-500 tabular-nums truncate">
+            현재 <span className={`font-extrabold ${theme.text}`}>{fmtHours(lifetimeHours)}시간</span>
+            <span className="text-stone-300 mx-1">·</span>
+            달성률 <span className={`font-extrabold ${theme.text}`}>{goalPct.toFixed(2)}%</span>
+          </span>
+        </div>
+        <div className="mt-1.5 h-1.5 rounded-full bg-stone-100 overflow-hidden">
+          <div
+            className={`h-full rounded-full ${theme.bg} transition-all duration-500`}
+            style={{ width: `${Math.max(goalPct, lifetimeMin > 0 ? 0.5 : 0)}%` }}
+          />
+        </div>
       </div>
 
       {/* 과목선택 + 오늘 누적 요약 (한 줄) */}
