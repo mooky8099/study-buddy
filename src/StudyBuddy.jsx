@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.4-FB";
+const APP_VERSION = "v10.5-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-08-03";
 const MASTERS = [
@@ -55,6 +55,10 @@ const SUBJECTS = [
 
 // 혼공 누적 목표 시간 (시간 단위)
 const STUDY_GOAL_HOURS = 5840;
+// 한 번에 인정하는 최대 연속 학습 시간(분). 끄는 걸 잊은 타이머가 누적시간을 오염시키는 걸 방지
+const MAX_SESSION_MIN = 720; // 12시간
+// 이 시간을 넘기면 화면에 "오래 실행 중" 경고 표시(분)
+const LONG_SESSION_WARN_MIN = 240; // 4시간
 
 // 특별 포인트: 부모(관리자)가 체크하면 그날 20포인트 지급
 const BONUS_PTS = 20;
@@ -1043,7 +1047,29 @@ export default function StudyBuddy() {
     const active = profile.timerActive;
     if (!active) return;
     const subjLabel = SUBJECTS.find((s) => s.id === active.subject)?.label;
-    const minutes = Math.round((Date.now() - active.startAt) / 60000);
+    const rawMinutes = Math.round((Date.now() - active.startAt) / 60000);
+
+    // 끄는 걸 잊은 타이머 방어: 비정상적으로 긴 세션은 사용자에게 확인 후 조정/폐기
+    let minutes = rawMinutes;
+    let capped = false;
+    if (rawMinutes > MAX_SESSION_MIN) {
+      const ok = window.confirm(
+        `타이머가 ${fmtDur(rawMinutes)} 동안 켜져 있었어요.\n` +
+        `끄는 걸 잊으신 것 같습니다.\n\n` +
+        `[확인] ${fmtDur(MAX_SESSION_MIN)}으로 줄여서 기록\n` +
+        `[취소] 이번 기록은 저장하지 않음`
+      );
+      if (!ok) {
+        // 기록하지 않고 타이머만 해제
+        updateProfile((p) => ({ ...p, timerActive: null }), { action: "타이머 기록 취소", detail: `${subjLabel} (${fmtDur(rawMinutes)} 비정상 세션 폐기)` });
+        logActivity("stop", `${theme.realName}님이 ${subjLabel} 타이머를 종료했습니다 (기록 안 함)`);
+        showToast("기록하지 않고 타이머를 껐어요");
+        return;
+      }
+      minutes = MAX_SESSION_MIN;
+      capped = true;
+    }
+
     updateProfile(
       (p) => ({
         ...p,
@@ -1053,13 +1079,15 @@ export default function StudyBuddy() {
           : (p.timerLogs || []),
       }),
       minutes > 0
-        ? { action: "타이머 기록", detail: `${subjLabel} ${fmtDur(minutes)}` }
+        ? { action: "타이머 기록", detail: `${subjLabel} ${fmtDur(minutes)}${capped ? ` (원래 ${fmtDur(rawMinutes)} → 상한 조정)` : ""}` }
         : null
     );
     logActivity("stop", minutes > 0
       ? `${theme.realName}님이 ${subjLabel} 공부를 종료했습니다 (${fmtDur(minutes)})`
       : `${theme.realName}님이 ${subjLabel} 타이머를 종료했습니다`);
-    showToast(minutes > 0 ? `${subjLabel} ${fmtDur(minutes)} 기록` : "1분 미만은 저장 안 돼요");
+    showToast(minutes > 0
+      ? (capped ? `${fmtDur(minutes)}으로 조정해 기록했어요` : `${subjLabel} ${fmtDur(minutes)} 기록`)
+      : "1분 미만은 저장 안 돼요");
   };
 
   const weekStats = useMemo(() => computeStats(profile, startOfWeek(), now() + 1), [profile]);
@@ -1393,6 +1421,17 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
           </button>
         )}
       </div>
+
+      {/* 오래 실행 중인 타이머 경고 (끄는 걸 잊은 경우) */}
+      {active && Math.floor(elapsed / 60) >= LONG_SESSION_WARN_MIN && (
+        <div className="mt-2.5 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 flex items-start gap-2">
+          <span className="text-xs shrink-0 mt-0.5">⏰</span>
+          <p className="text-[11px] font-bold text-amber-700 leading-snug">
+            타이머가 {fmtDur(Math.floor(elapsed / 60))}째 실행 중이에요. 끄는 걸 잊었다면 지금 종료해 주세요.
+            {Math.floor(elapsed / 60) > MAX_SESSION_MIN && ` (${fmtDur(MAX_SESSION_MIN)}을 넘으면 기록 시 조정됩니다)`}
+          </p>
+        </div>
+      )}
 
       {/* 혼공 누적 목표 달성 현황 */}
       <div className="mt-2.5 pt-2.5 border-t border-stone-100">
