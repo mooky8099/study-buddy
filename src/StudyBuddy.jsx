@@ -30,9 +30,9 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.3-FB";
+const APP_VERSION = "v10.4-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
-const LAST_UPDATED = "2026-08-02";
+const LAST_UPDATED = "2026-08-03";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
   { name: "민지선", pw: "5551" },
@@ -267,6 +267,8 @@ export default function StudyBuddy() {
   const [ruleError, setRuleError] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const [saveBlocked, setSaveBlocked] = useState(false);
+  const [resyncKey, setResyncKey] = useState(0);
+  const [syncing, setSyncing] = useState(true);
   const [toast, setToast] = useState(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [targetDate, setTargetDate] = useState(() => todayStartMs());
@@ -349,6 +351,11 @@ export default function StudyBuddy() {
   const sawServerData = useRef(false);
   // 저장 디바운스 타이머
   const saveTimer = useRef(null);
+  // 서버 문서의 판번호(_rev). 저장 시 이 값과 서버 값이 같을 때만 기록 → 남의 최신 변경을 덮어쓰지 않음
+  const baseRev = useRef(null);
+  // 항상 최신 상태를 가리키는 참조 (예약된 저장이 옛 데이터를 쓰지 않도록)
+  const latestData = useRef(data);
+  latestData.current = data;
 
   // ① 실시간 구독: Firestore 문서가 바뀔 때마다 자동으로 화면 갱신
   useEffect(() => {
@@ -413,6 +420,8 @@ export default function StudyBuddy() {
           }));
           if (!fromCache) {
             hydrated.current = true; // 서버가 확인해 준 데이터를 읽음 → 이제부터 저장 허용
+            baseRev.current = parsed._rev || 0; // 이 판번호를 기준으로 저장한다
+            setSyncing(false);
             if (!looksEmptyData(parsed)) {
               sawServerData.current = true; // 서버에 실제 내용이 있었음 (빈 데이터 덮어쓰기 차단용)
               saveLocalSafety(parsed);      // 마지막 정상 데이터를 이 기기에 안전 사본으로 보관
@@ -421,14 +430,18 @@ export default function StudyBuddy() {
             // ★ 서버와 동기화가 끊긴 상태(오프라인/절전 복귀 직후).
             //   이때 화면의 오래된 상태로 저장하면 최신 서버 데이터를 덮어씀 → 저장 차단.
             hydrated.current = false;
+            setSyncing(true);
           }
         } else if (!fromCache) {
           // 서버가 "문서 없음"을 확인해 준 경우에만 최초 생성 (진짜 첫 실행)
-          setDoc(DOC_REF, stripSession(DEFAULT_DATA)).catch((e) => console.error("초기 생성 실패:", e));
+          setDoc(DOC_REF, { ...stripSession(DEFAULT_DATA), _rev: 1 }).catch((e) => console.error("초기 생성 실패:", e));
+          baseRev.current = 1;
           hydrated.current = true;
+          setSyncing(false);
         } else {
           // 캐시발 "문서 없음" → 아직 서버 응답 전일 뿐. 아무것도 하지 않고 저장도 막는다.
           hydrated.current = false;
+          setSyncing(true);
         }
 
         setConnected(!fromCache);
@@ -446,38 +459,67 @@ export default function StudyBuddy() {
     // 6초 안에 응답이 없으면 화면만 띄움. hydrated는 false로 두어 저장은 계속 막음(서버 보호)
     const t = setTimeout(() => setLoaded(true), 6000);
     return () => { clearTimeout(t); unsub(); };
-  }, []);
+  }, [resyncKey]);
+
+  // 실제 저장 실행: 서버 판번호(_rev)가 내가 읽은 값과 같을 때만 기록한다.
+  // 다른 기기가 그 사이 저장했다면 내 쓰기를 포기 → 남의 최신 데이터를 덮어쓰는 사고를 구조적으로 차단.
+  const flushSave = async () => {
+    if (!hydrated.current) return;              // 동기화 안 된 상태면 저장 안 함
+    const snapshotData = latestData.current;    // 예약 시점이 아닌 "지금 최신" 상태를 저장
+    if (sawServerData.current && looksEmptyData(snapshotData)) {
+      setSaveBlocked(true);
+      return;
+    }
+    try {
+      await runTransaction(db, async (tx) => {
+        const cur = await tx.get(DOC_REF);
+        const serverRev = cur.exists() ? (cur.data()._rev || 0) : 0;
+        if (baseRev.current !== null && serverRev !== baseRev.current) {
+          // 서버가 더 최신 → 내 쓰기를 포기한다(곧 도착할 스냅샷으로 화면이 최신화됨)
+          throw new Error("STALE_REV");
+        }
+        const nextRev = serverRev + 1;
+        tx.set(DOC_REF, { ...stripSession(snapshotData), _rev: nextRev });
+        baseRev.current = nextRev;
+      });
+      setSaveError(false);
+    } catch (e) {
+      if (e && e.message === "STALE_REV") {
+        console.warn("다른 기기의 최신 데이터가 있어 이번 저장을 건너뛰었습니다.");
+        return; // 오류로 취급하지 않음
+      }
+      console.error("저장 실패:", e);
+      setSaveError(true);
+    }
+  };
 
   // ② 로컬 변경을 Firestore에 저장 (서버를 실제로 읽기 전에는 절대 저장하지 않음)
   useEffect(() => {
     if (!loaded || !FB_CONFIGURED) return;
     if (!hydrated.current) return; // ★ 서버와 동기화된 상태가 아니면 저장 금지
     if (remoteEcho.current) { remoteEcho.current = false; return; }
-    // ★ 최후의 안전벨트: 서버에 내용이 있었는데 지금 보낼 데이터가 텅 비었으면 저장을 거부한다.
     if (sawServerData.current && looksEmptyData(data)) {
       console.warn("빈 데이터로 덮어쓰려는 저장을 차단했습니다.");
       setSaveBlocked(true);
       return;
     }
-    // 연속 변경을 모아서 한 번만 저장 (쓰기 폭주 방지)
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        await setDoc(DOC_REF, stripSession(data));
-        setSaveError(false);
-      } catch (e) {
-        console.error("저장 실패:", e);
-        setSaveError(true);
-      }
+    // 이미 예약된 저장이 있으면 그대로 둔다(취소하지 않음) → 저장이 조용히 사라지는 문제 방지
+    if (saveTimer.current) return;
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null;
+      flushSave();
     }, 600);
-    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
   }, [data, loaded]);
 
-  // 화면 복귀(절전 해제/탭 전환) 시에는 서버 재확인 전까지 저장을 막는다.
-  // 오래된 화면 상태가 최신 서버 데이터를 덮어쓰는 사고를 막기 위함.
+  // 화면 복귀(절전 해제/탭 전환) 시: 저장을 잠그고 구독을 다시 걸어 서버 상태를 재확인한다.
+  // 오래된 화면 상태가 최신 서버 데이터를 덮어쓰는 사고를 막으면서, 동기화가 영구히 멈추지도 않게 함.
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === "visible") hydrated.current = false;
+      if (document.visibilityState === "visible") {
+        hydrated.current = false;
+        setSyncing(true);
+        setResyncKey((k) => k + 1); // 재구독 → 서버 스냅샷을 다시 받아 hydrated 복구
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
@@ -575,6 +617,7 @@ export default function StudyBuddy() {
         if (!window.confirm("지금 데이터를 이 백업으로 덮어씁니다. 계속할까요?")) return;
         remoteEcho.current = false; // 로컬 변경으로 처리 → 서버에 저장되게
         hydrated.current = true;    // 사용자가 명시적으로 복구를 지시함
+        baseRev.current = null;     // 판번호 검사 건너뜀(복구는 강제 적용)
         sawServerData.current = false; // 복구본 기준으로 다시 판단
         setSaveBlocked(false);
         setData((prev) => ({ ...DEFAULT_DATA, ...restored, session: prev.session }));
@@ -596,6 +639,7 @@ export default function StudyBuddy() {
     if (!window.confirm(`이 기기에 보관된 ${when} 시점 데이터로 되돌립니다. 계속할까요?`)) return;
     remoteEcho.current = false;
     hydrated.current = true; // 사용자가 명시적으로 복구를 지시함
+    baseRev.current = null;  // 판번호 검사 건너뜀(복구는 강제 적용)
     sawServerData.current = false; // 복구본 기준으로 다시 판단
     setSaveBlocked(false);
     setData((prev) => ({ ...DEFAULT_DATA, ...snap.data, session: prev.session }));
@@ -1083,6 +1127,12 @@ export default function StudyBuddy() {
 
         {/* ── 본문 ── */}
         <main className={`flex-1 px-5 overflow-y-auto ${kbOpen ? "pt-2 pb-6" : "pt-4 pb-24"}`}>
+          {FB_CONFIGURED && connected && syncing && !saveBlocked && !saveError && (
+            <div className="mb-3 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-2 flex items-center gap-2">
+              <span className="w-3 h-3 rounded-full border-2 border-stone-300 border-t-stone-500 animate-spin shrink-0"></span>
+              <p className="text-[11px] font-bold text-stone-500">서버와 동기화 확인 중… 잠시 후 입력해 주세요.</p>
+            </div>
+          )}
           {FB_CONFIGURED && saveBlocked && (
             <div className="mb-3 rounded-2xl border-2 border-red-300 bg-red-50 px-4 py-2.5 flex items-start gap-2">
               <span className="text-sm shrink-0 mt-0.5">🛡️</span>
