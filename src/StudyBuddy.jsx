@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.5-FB";
+const APP_VERSION = "v10.6-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-08-03";
 const MASTERS = [
@@ -467,7 +467,7 @@ export default function StudyBuddy() {
 
   // 실제 저장 실행: 서버 판번호(_rev)가 내가 읽은 값과 같을 때만 기록한다.
   // 다른 기기가 그 사이 저장했다면 내 쓰기를 포기 → 남의 최신 데이터를 덮어쓰는 사고를 구조적으로 차단.
-  const flushSave = async () => {
+  const flushSave = async (attempt = 0) => {
     if (!hydrated.current) return;              // 동기화 안 된 상태면 저장 안 함
     const snapshotData = latestData.current;    // 예약 시점이 아닌 "지금 최신" 상태를 저장
     if (sawServerData.current && looksEmptyData(snapshotData)) {
@@ -477,13 +477,24 @@ export default function StudyBuddy() {
     try {
       await runTransaction(db, async (tx) => {
         const cur = await tx.get(DOC_REF);
-        const serverRev = cur.exists() ? (cur.data()._rev || 0) : 0;
+        const serverData = cur.exists() ? cur.data() : null;
+        const serverRev = serverData ? (serverData._rev || 0) : 0;
         if (baseRev.current !== null && serverRev !== baseRev.current) {
           // 서버가 더 최신 → 내 쓰기를 포기한다(곧 도착할 스냅샷으로 화면이 최신화됨)
           throw new Error("STALE_REV");
         }
+        const payload = { ...stripSession(snapshotData) };
+        // ★ 실행 중인 타이머 보호: 내가 보고 있는 아이 말고 다른 아이의 timerActive는
+        //   서버 값을 그대로 유지한다. (구버전 기기가 켜둔 타이머가 지워지는 사고 방지)
+        if (serverData) {
+          ["first", "second", "third"].forEach((k) => {
+            if (k === activeKid) return;
+            const serverTimer = serverData[k]?.timerActive;
+            if (serverTimer && payload[k]) payload[k] = { ...payload[k], timerActive: serverTimer };
+          });
+        }
         const nextRev = serverRev + 1;
-        tx.set(DOC_REF, { ...stripSession(snapshotData), _rev: nextRev });
+        tx.set(DOC_REF, { ...payload, _rev: nextRev, _updatedAt: Date.now() });
         baseRev.current = nextRev;
       });
       setSaveError(false);
@@ -491,6 +502,15 @@ export default function StudyBuddy() {
       if (e && e.message === "STALE_REV") {
         console.warn("다른 기기의 최신 데이터가 있어 이번 저장을 건너뛰었습니다.");
         return; // 오류로 취급하지 않음
+      }
+      // 일시적 네트워크 문제는 바로 실패로 처리하지 않고 재시도한다.
+      // (트랜잭션은 setDoc과 달리 오프라인 대기열을 쓰지 않아 순간 끊김에도 실패함)
+      const transient = e && ["unavailable", "deadline-exceeded", "aborted", "cancelled", "internal"].includes(e.code);
+      if (transient && attempt < 4) {
+        const wait = 800 * Math.pow(2, attempt); // 0.8s → 1.6s → 3.2s → 6.4s
+        console.warn(`저장 재시도 ${attempt + 1}회 (${wait}ms 후)`);
+        setTimeout(() => flushSave(attempt + 1), wait);
+        return;
       }
       console.error("저장 실패:", e);
       setSaveError(true);
@@ -1174,7 +1194,8 @@ export default function StudyBuddy() {
             <div className="mb-3 rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-2.5 flex items-start gap-2">
               <span className="text-sm shrink-0 mt-0.5">⚠️</span>
               <p className="text-[11px] font-bold text-amber-700 leading-snug">
-                저장에 실패했어요. 방금 변경한 내용이 서버에 반영되지 않았을 수 있어요. 연결 상태를 확인해 주세요.
+                저장이 지연되고 있어요. 잠시 후 자동으로 다시 시도합니다.
+                <span className="font-extrabold"> 계속 표시되면 새로고침</span>해 주세요. (다른 기기의 기록은 안전합니다)
               </p>
             </div>
           )}
