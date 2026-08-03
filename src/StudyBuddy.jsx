@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.7-FB";
+const APP_VERSION = "v10.8-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-08-03";
 const MASTERS = [
@@ -359,6 +359,8 @@ export default function StudyBuddy() {
   const saveTimer = useRef(null);
   // 서버 문서의 판번호(_rev). 저장 시 이 값과 서버 값이 같을 때만 기록 → 남의 최신 변경을 덮어쓰지 않음
   const baseRev = useRef(null);
+  // 구독으로 확인한 서버의 최신 판번호 (저장 직전 비교용)
+  const latestServerRev = useRef(null);
   // 항상 최신 상태를 가리키는 참조 (예약된 저장이 옛 데이터를 쓰지 않도록)
   const latestData = useRef(data);
   latestData.current = data;
@@ -427,6 +429,7 @@ export default function StudyBuddy() {
           if (!fromCache) {
             hydrated.current = true; // 서버가 확인해 준 데이터를 읽음 → 이제부터 저장 허용
             baseRev.current = parsed._rev || 0; // 이 판번호를 기준으로 저장한다
+            latestServerRev.current = parsed._rev || 0;
             setSyncing(false);
             // 다른 기기가 구버전으로 접속해 있으면 보호 장치가 헐거워짐 → 감지해서 알림
             const writerVer = parsed._writerVer;
@@ -450,6 +453,7 @@ export default function StudyBuddy() {
           // 서버가 "문서 없음"을 확인해 준 경우에만 최초 생성 (진짜 첫 실행)
           setDoc(DOC_REF, { ...stripSession(DEFAULT_DATA), _rev: 1 }).catch((e) => console.error("초기 생성 실패:", e));
           baseRev.current = 1;
+          latestServerRev.current = 1;
           hydrated.current = true;
           setSyncing(false);
         } else {
@@ -475,8 +479,10 @@ export default function StudyBuddy() {
     return () => { clearTimeout(t); unsub(); };
   }, [resyncKey]);
 
-  // 실제 저장 실행: 서버 판번호(_rev)가 내가 읽은 값과 같을 때만 기록한다.
-  // 다른 기기가 그 사이 저장했다면 내 쓰기를 포기 → 남의 최신 데이터를 덮어쓰는 사고를 구조적으로 차단.
+  // 실제 저장 실행.
+  // 판번호(_rev)는 실시간 구독으로 항상 최신값을 알고 있으므로, 트랜잭션 없이도
+  // "내가 아는 판번호 = 서버 판번호"일 때만 쓰도록 해서 덮어쓰기를 막는다.
+  // setDoc은 오프라인이면 대기열에 넣었다가 연결될 때 자동 전송되므로 순간 끊김에 강하다.
   const flushSave = async (attempt = 0) => {
     if (!hydrated.current) return;              // 동기화 안 된 상태면 저장 안 함
     const snapshotData = latestData.current;    // 예약 시점이 아닌 "지금 최신" 상태를 저장
@@ -484,67 +490,32 @@ export default function StudyBuddy() {
       setSaveBlocked(true);
       return;
     }
+    // 구독으로 받아둔 서버 최신 판번호와 내 기준값이 어긋나면(=다른 기기가 먼저 씀) 이번 저장은 건너뛴다.
+    const seenRev = latestServerRev.current;
+    if (baseRev.current !== null && seenRev !== null && seenRev !== baseRev.current) {
+      console.warn("다른 기기의 최신 데이터가 있어 이번 저장을 건너뛰었습니다.");
+      return;
+    }
+    const nextRev = (baseRev.current || 0) + 1;
     try {
-      await runTransaction(db, async (tx) => {
-        const cur = await tx.get(DOC_REF);
-        const serverData = cur.exists() ? cur.data() : null;
-        const serverRev = serverData ? (serverData._rev || 0) : 0;
-        if (baseRev.current !== null && serverRev !== baseRev.current) {
-          // 서버가 더 최신 → 내 쓰기를 포기한다(곧 도착할 스냅샷으로 화면이 최신화됨)
-          throw new Error("STALE_REV");
-        }
-        const payload = { ...stripSession(snapshotData) };
-        // ★ 실행 중인 타이머 보호: 내가 보고 있는 아이 말고 다른 아이의 timerActive는
-        //   서버 값을 그대로 유지한다. (구버전 기기가 켜둔 타이머가 지워지는 사고 방지)
-        if (serverData) {
-          ["first", "second", "third"].forEach((k) => {
-            if (k === activeKid) return;
-            const serverTimer = serverData[k]?.timerActive;
-            if (serverTimer && payload[k]) payload[k] = { ...payload[k], timerActive: serverTimer };
-          });
-        }
-        const nextRev = serverRev + 1;
-        tx.set(DOC_REF, {
-          ...payload,
-          _rev: nextRev,
-          _updatedAt: Date.now(),
-          _writer: currentUser?.name || "?",
-          _writerVer: APP_VERSION, // 어느 버전이 마지막으로 썼는지 (버전 섞임 감지용)
-        });
-        baseRev.current = nextRev;
+      await setDoc(DOC_REF, {
+        ...stripSession(snapshotData),
+        _rev: nextRev,
+        _updatedAt: Date.now(),
+        _writer: currentUser?.name || "?",
+        _writerVer: APP_VERSION, // 어느 버전이 마지막으로 썼는지 (버전 섞임 감지용)
       });
+      baseRev.current = nextRev;
+      latestServerRev.current = nextRev;
       setSaveError(false);
       setSaveErrCode("");
     } catch (e) {
-      if (e && e.message === "STALE_REV") {
-        console.warn("다른 기기의 최신 데이터가 있어 이번 저장을 건너뛰었습니다.");
-        return; // 오류로 취급하지 않음
-      }
-      // 일시적 네트워크 문제는 바로 실패로 처리하지 않고 재시도한다.
-      // (트랜잭션은 setDoc과 달리 오프라인 대기열을 쓰지 않아 순간 끊김에도 실패함)
       const transient = e && ["unavailable", "deadline-exceeded", "aborted", "cancelled", "internal"].includes(e.code);
       if (transient && attempt < 4) {
         const wait = 800 * Math.pow(2, attempt); // 0.8s → 1.6s → 3.2s → 6.4s
         console.warn(`저장 재시도 ${attempt + 1}회 (${wait}ms 후)`);
         setTimeout(() => flushSave(attempt + 1), wait);
         return;
-      }
-      // 마지막 수단: 오프라인 대기열을 쓰는 setDoc으로 저장 시도
-      // (트랜잭션은 네트워크가 없으면 즉시 실패하지만 setDoc은 연결되면 자동 전송됨)
-      if (transient) {
-        try {
-          await setDoc(DOC_REF, {
-            ...stripSession(latestData.current),
-            _rev: (baseRev.current || 0) + 1,
-            _updatedAt: Date.now(),
-            _writer: currentUser?.name || "?",
-            _writerVer: APP_VERSION,
-          });
-          baseRev.current = (baseRev.current || 0) + 1;
-          setSaveError(false);
-          setSaveErrCode("");
-          return;
-        } catch (e2) { console.error("대체 저장도 실패:", e2); }
       }
       console.error("저장 실패:", e);
       setSaveErrCode(e?.code || e?.message || "unknown");
@@ -677,6 +648,7 @@ export default function StudyBuddy() {
         remoteEcho.current = false; // 로컬 변경으로 처리 → 서버에 저장되게
         hydrated.current = true;    // 사용자가 명시적으로 복구를 지시함
         baseRev.current = null;     // 판번호 검사 건너뜀(복구는 강제 적용)
+        latestServerRev.current = null;
         sawServerData.current = false; // 복구본 기준으로 다시 판단
         setSaveBlocked(false);
         setData((prev) => ({ ...DEFAULT_DATA, ...restored, session: prev.session }));
@@ -699,6 +671,7 @@ export default function StudyBuddy() {
     remoteEcho.current = false;
     hydrated.current = true; // 사용자가 명시적으로 복구를 지시함
     baseRev.current = null;  // 판번호 검사 건너뜀(복구는 강제 적용)
+    latestServerRev.current = null;
     sawServerData.current = false; // 복구본 기준으로 다시 판단
     setSaveBlocked(false);
     setData((prev) => ({ ...DEFAULT_DATA, ...snap.data, session: prev.session }));
