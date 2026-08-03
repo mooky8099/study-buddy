@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.8-FB";
+const APP_VERSION = "v10.9-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-08-03";
 const MASTERS = [
@@ -93,6 +93,33 @@ const THEMES = {
 const now = () => Date.now();
 // 로그인 세션은 기기마다 다르므로 Firestore에는 저장하지 않음
 const stripSession = (d) => { const { session, ...rest } = d; return rest; };
+
+// 버전 비교: "v10.8-FB" → [10, 8]
+const verNum = (v) => {
+  const m = String(v || "").match(/v?(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2])] : [0, 0];
+};
+// a가 b보다 높은 버전인가
+const verGt = (a, b) => {
+  const A = verNum(a), B = verNum(b);
+  return A[0] !== B[0] ? A[0] > B[0] : A[1] > B[1];
+};
+// 캐시까지 비우고 완전히 새로 받기 (홈 화면 추가 앱은 캐시가 오래 남음)
+const hardReload = async () => {
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch (e) { /* 무시 */ }
+  try {
+    if (navigator.serviceWorker) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    }
+  } catch (e) { /* 무시 */ }
+  window.location.reload();
+};
 
 // 데이터가 "사실상 비어 있는 초기 상태"인지 판별 (덮어쓰기 사고 방지용 공용 함수)
 const looksEmptyData = (d) => {
@@ -275,6 +302,8 @@ export default function StudyBuddy() {
   const [syncing, setSyncing] = useState(true);
   const [saveErrCode, setSaveErrCode] = useState("");
   const [staleDevice, setStaleDevice] = useState(null);
+  const [updateAvailable, setUpdateAvailable] = useState(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const [toast, setToast] = useState(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [targetDate, setTargetDate] = useState(() => todayStartMs());
@@ -361,6 +390,8 @@ export default function StudyBuddy() {
   const baseRev = useRef(null);
   // 구독으로 확인한 서버의 최신 판번호 (저장 직전 비교용)
   const latestServerRev = useRef(null);
+  // 지금까지 확인한 가장 높은 앱 버전 (문서에 기록해 구버전 기기에 알림)
+  const latestVerRef = useRef(APP_VERSION);
   // 항상 최신 상태를 가리키는 참조 (예약된 저장이 옛 데이터를 쓰지 않도록)
   const latestData = useRef(data);
   latestData.current = data;
@@ -431,6 +462,11 @@ export default function StudyBuddy() {
             baseRev.current = parsed._rev || 0; // 이 판번호를 기준으로 저장한다
             latestServerRev.current = parsed._rev || 0;
             setSyncing(false);
+            // 공유 문서에 기록된 "가장 최신 버전"과 비교 → 이 기기가 구버전이면 알림
+            const docLatest = parsed._latestVer;
+            const newest = docLatest && verGt(docLatest, APP_VERSION) ? docLatest : APP_VERSION;
+            latestVerRef.current = newest;
+            setUpdateAvailable(verGt(newest, APP_VERSION) ? newest : null);
             // 다른 기기가 구버전으로 접속해 있으면 보호 장치가 헐거워짐 → 감지해서 알림
             const writerVer = parsed._writerVer;
             const writer = parsed._writer;
@@ -504,6 +540,8 @@ export default function StudyBuddy() {
         _updatedAt: Date.now(),
         _writer: currentUser?.name || "?",
         _writerVer: APP_VERSION, // 어느 버전이 마지막으로 썼는지 (버전 섞임 감지용)
+        // 지금까지 본 것 중 가장 높은 버전을 기록 → 구버전 기기가 이 값을 보고 업데이트 안내를 띄움
+        _latestVer: verGt(latestVerRef.current || "", APP_VERSION) ? latestVerRef.current : APP_VERSION,
       });
       baseRev.current = nextRev;
       latestServerRev.current = nextRev;
@@ -1130,11 +1168,22 @@ export default function StudyBuddy() {
     );
   }
 
-  if (!currentUser) return <><FontLoader /><AuthScreen login={login} signup={signup} toast={toast} connected={connected} /></>;
+  if (!currentUser) return (
+    <>
+      <FontLoader />
+      {updateAvailable && !updateDismissed && (
+        <UpdatePrompt latest={updateAvailable} onDismiss={() => setUpdateDismissed(true)} />
+      )}
+      <AuthScreen login={login} signup={signup} toast={toast} connected={connected} />
+    </>
+  );
 
   return (
     <div style={FONT} className="min-h-screen bg-stone-50 text-stone-900">
       <FontLoader />
+      {updateAvailable && !updateDismissed && (
+        <UpdatePrompt latest={updateAvailable} onDismiss={() => setUpdateDismissed(true)} />
+      )}
       <div className="max-w-md mx-auto min-h-screen flex flex-col relative">
         {/* ── 헤더 ── */}
         <header className={`sticky top-0 z-20 px-5 bg-stone-50/90 backdrop-blur-md border-b border-stone-100 overflow-hidden transition-all duration-200 ${
@@ -1197,6 +1246,18 @@ export default function StudyBuddy() {
                 앱을 완전히 껐다 다시 열어 주세요. 계속되면 관리자 → 백업에서 사본으로 복구하세요.
               </p>
             </div>
+          )}
+          {FB_CONFIGURED && updateAvailable && updateDismissed && (
+            <button
+              onClick={hardReload}
+              className="mb-3 w-full rounded-2xl border-2 border-amber-400 bg-amber-50 px-4 py-2.5 flex items-center gap-2 active:scale-[0.99]"
+            >
+              <span className="text-sm shrink-0">🔄</span>
+              <p className="flex-1 text-left text-[11px] font-bold text-amber-700 leading-snug">
+                구버전({APP_VERSION})으로 쓰는 중이에요. 최신은 {updateAvailable} 입니다.
+                <span className="font-extrabold"> 눌러서 새로고침</span>하세요.
+              </p>
+            </button>
           )}
           {FB_CONFIGURED && staleDevice && (
             <div className="mb-3 rounded-2xl border-2 border-orange-300 bg-orange-50 px-4 py-2.5 flex items-start gap-2">
@@ -1530,6 +1591,43 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ═══════════ 업데이트 안내 (구버전 기기) ═══════════
+function UpdatePrompt({ latest, onDismiss }) {
+  const [busy, setBusy] = useState(false);
+  const doReload = async () => { setBusy(true); await hardReload(); };
+  return (
+    <div style={FONT} className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-sm flex items-center justify-center px-6">
+      <div className="w-full max-w-sm bg-white rounded-3xl p-6 space-y-4 shadow-xl">
+        <div className="text-center space-y-2">
+          <div className="w-14 h-14 mx-auto rounded-3xl bg-amber-400 flex items-center justify-center text-2xl">🔄</div>
+          <h2 className="text-lg font-extrabold text-stone-800 mt-2">새 버전이 나왔어요</h2>
+          <p className="text-xs font-bold text-stone-500 leading-relaxed">
+            이 기기는 <span className="text-stone-700">{APP_VERSION}</span>,
+            최신은 <span className="text-amber-600">{latest}</span> 이에요.
+          </p>
+        </div>
+        <p className="text-[11px] text-stone-500 leading-relaxed bg-stone-50 rounded-2xl px-4 py-3">
+          구버전으로 계속 쓰면 <span className="font-extrabold text-stone-700">다른 기기의 기록을 되돌려 쓸 수 있어요.</span>
+          아래 버튼을 눌러 최신 버전으로 새로고침해 주세요. 타이머와 기록은 그대로 유지됩니다.
+        </p>
+        <button
+          onClick={doReload}
+          disabled={busy}
+          className="w-full h-13 py-3.5 rounded-2xl bg-stone-800 text-white text-sm font-extrabold active:scale-95 disabled:opacity-50"
+        >
+          {busy ? "새로 받는 중…" : "최신 버전으로 새로고침"}
+        </button>
+        <button
+          onClick={onDismiss}
+          className="w-full h-10 text-[11px] font-bold text-stone-400 active:text-stone-600"
+        >
+          나중에 (권장하지 않음)
+        </button>
+      </div>
     </div>
   );
 }
@@ -3036,6 +3134,7 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
             ["마지막 저장", data._updatedAt ? new Date(data._updatedAt).toLocaleString("ko-KR") : "기록 없음"],
             ["마지막 저장자", data._writer || "-"],
             ["저장한 앱 버전", data._writerVer || "구버전(표시 없음)"],
+            ["최신 배포 버전", data._latestVer || "-"],
             ["이 기기 버전", APP_VERSION],
           ].map(([k, v]) => (
             <div key={k} className="flex items-center justify-between">
