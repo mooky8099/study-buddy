@@ -30,7 +30,7 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.6-FB";
+const APP_VERSION = "v10.7-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
 const LAST_UPDATED = "2026-08-03";
 const MASTERS = [
@@ -273,6 +273,8 @@ export default function StudyBuddy() {
   const [saveBlocked, setSaveBlocked] = useState(false);
   const [resyncKey, setResyncKey] = useState(0);
   const [syncing, setSyncing] = useState(true);
+  const [saveErrCode, setSaveErrCode] = useState("");
+  const [staleDevice, setStaleDevice] = useState(null);
   const [toast, setToast] = useState(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [targetDate, setTargetDate] = useState(() => todayStartMs());
@@ -426,6 +428,14 @@ export default function StudyBuddy() {
             hydrated.current = true; // 서버가 확인해 준 데이터를 읽음 → 이제부터 저장 허용
             baseRev.current = parsed._rev || 0; // 이 판번호를 기준으로 저장한다
             setSyncing(false);
+            // 다른 기기가 구버전으로 접속해 있으면 보호 장치가 헐거워짐 → 감지해서 알림
+            const writerVer = parsed._writerVer;
+            const writer = parsed._writer;
+            if (writerVer && writerVer !== APP_VERSION && writer !== (currentUser?.name || "?")) {
+              setStaleDevice({ ver: writerVer, who: writer || "다른 기기" });
+            } else if (writerVer === APP_VERSION) {
+              setStaleDevice(null);
+            }
             if (!looksEmptyData(parsed)) {
               sawServerData.current = true; // 서버에 실제 내용이 있었음 (빈 데이터 덮어쓰기 차단용)
               saveLocalSafety(parsed);      // 마지막 정상 데이터를 이 기기에 안전 사본으로 보관
@@ -494,10 +504,17 @@ export default function StudyBuddy() {
           });
         }
         const nextRev = serverRev + 1;
-        tx.set(DOC_REF, { ...payload, _rev: nextRev, _updatedAt: Date.now() });
+        tx.set(DOC_REF, {
+          ...payload,
+          _rev: nextRev,
+          _updatedAt: Date.now(),
+          _writer: currentUser?.name || "?",
+          _writerVer: APP_VERSION, // 어느 버전이 마지막으로 썼는지 (버전 섞임 감지용)
+        });
         baseRev.current = nextRev;
       });
       setSaveError(false);
+      setSaveErrCode("");
     } catch (e) {
       if (e && e.message === "STALE_REV") {
         console.warn("다른 기기의 최신 데이터가 있어 이번 저장을 건너뛰었습니다.");
@@ -512,7 +529,25 @@ export default function StudyBuddy() {
         setTimeout(() => flushSave(attempt + 1), wait);
         return;
       }
+      // 마지막 수단: 오프라인 대기열을 쓰는 setDoc으로 저장 시도
+      // (트랜잭션은 네트워크가 없으면 즉시 실패하지만 setDoc은 연결되면 자동 전송됨)
+      if (transient) {
+        try {
+          await setDoc(DOC_REF, {
+            ...stripSession(latestData.current),
+            _rev: (baseRev.current || 0) + 1,
+            _updatedAt: Date.now(),
+            _writer: currentUser?.name || "?",
+            _writerVer: APP_VERSION,
+          });
+          baseRev.current = (baseRev.current || 0) + 1;
+          setSaveError(false);
+          setSaveErrCode("");
+          return;
+        } catch (e2) { console.error("대체 저장도 실패:", e2); }
+      }
       console.error("저장 실패:", e);
+      setSaveErrCode(e?.code || e?.message || "unknown");
       setSaveError(true);
     }
   };
@@ -1190,12 +1225,24 @@ export default function StudyBuddy() {
               </p>
             </div>
           )}
+          {FB_CONFIGURED && staleDevice && (
+            <div className="mb-3 rounded-2xl border-2 border-orange-300 bg-orange-50 px-4 py-2.5 flex items-start gap-2">
+              <span className="text-sm shrink-0 mt-0.5">📱</span>
+              <p className="text-[11px] font-bold text-orange-700 leading-snug">
+                다른 기기가 <span className="font-extrabold">구버전({staleDevice.ver})</span>으로 접속 중이에요
+                {staleDevice.who ? ` (마지막 저장: ${staleDevice.who})` : ""}.
+                그 기기가 옛 내용을 되돌려 쓸 수 있어요.
+                <span className="font-extrabold"> 해당 기기를 완전히 닫았다가 다시 열어</span> 주세요.
+              </p>
+            </div>
+          )}
           {FB_CONFIGURED && saveError && !saveBlocked && (
             <div className="mb-3 rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-2.5 flex items-start gap-2">
               <span className="text-sm shrink-0 mt-0.5">⚠️</span>
               <p className="text-[11px] font-bold text-amber-700 leading-snug">
                 저장이 지연되고 있어요. 잠시 후 자동으로 다시 시도합니다.
-                <span className="font-extrabold"> 계속 표시되면 새로고침</span>해 주세요. (다른 기기의 기록은 안전합니다)
+                <span className="font-extrabold"> 계속 표시되면 새로고침</span>해 주세요.
+                {saveErrCode ? <span className="font-normal"> (원인 코드: {saveErrCode})</span> : null}
               </p>
             </div>
           )}
@@ -3005,6 +3052,31 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
           <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-emerald-400" : "bg-red-400"}`}></span>
           <span className="text-[10px] font-bold text-stone-400">{connected ? "연결됨" : "미연결"}</span>
         </div>
+      </div>
+
+      {/* ── 서버 상태 진단 ── */}
+      <div className={`${card} p-4 space-y-2`}>
+        <SectionLabel accent="bg-sky-400">서버 상태</SectionLabel>
+        <div className="space-y-1">
+          {[
+            ["판번호(_rev)", data._rev != null ? String(data._rev) : "없음"],
+            ["마지막 저장", data._updatedAt ? new Date(data._updatedAt).toLocaleString("ko-KR") : "기록 없음"],
+            ["마지막 저장자", data._writer || "-"],
+            ["저장한 앱 버전", data._writerVer || "구버전(표시 없음)"],
+            ["이 기기 버전", APP_VERSION],
+          ].map(([k, v]) => (
+            <div key={k} className="flex items-center justify-between">
+              <span className="text-[11px] font-bold text-stone-500">{k}</span>
+              <span className={`text-[11px] font-extrabold tabular-nums ${
+                k === "저장한 앱 버전" && v !== APP_VERSION ? "text-orange-500" : "text-stone-700"
+              }`}>{v}</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-[10px] text-stone-400 leading-snug pt-1">
+          입력할 때마다 <span className="font-bold">판번호가 올라가면 저장이 정상</span>입니다.
+          그대로면 저장이 막힌 상태예요. "저장한 앱 버전"이 이 기기와 다르면 그 기기를 새로고침하세요.
+        </p>
       </div>
 
       {/* ── 데이터 백업 ── */}
