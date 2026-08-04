@@ -30,9 +30,9 @@ const DOC_REF = doc(db, "studyroom", "shared");
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
 const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v10.9-FB";
+const APP_VERSION = "v11.0-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
-const LAST_UPDATED = "2026-08-03";
+const LAST_UPDATED = "2026-08-04";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
   { name: "민지선", pw: "5551" },
@@ -930,6 +930,35 @@ export default function StudyBuddy() {
     showToast(`"${rewardName}" 1개 차감했어요`);
   };
 
+  // 사용하지 않은 교환권을 취소하고 포인트로 환불
+  const refundOwnedReward = (rewardName) => {
+    const list = profile.purchases || [];
+    const usedCount = (profile.usedRewards && profile.usedRewards[rewardName]) || 0;
+    const ownedCount = list.filter((x) => x.name === rewardName).length;
+    // 사용하지 않은 수량이 남아 있어야 환불 가능
+    if (ownedCount - usedCount <= 0) { showToast("환불할 수 있는 교환권이 없어요"); return; }
+    const idx = list.findIndex((x) => x.name === rewardName); // purchases는 최신순 → 가장 최근 것부터 취소
+    if (idx === -1) { showToast("환불할 수 있는 교환권이 없어요"); return; }
+    const refunded = list[idx].cost;
+    const targetId = list[idx].id;
+
+    updateProfile(
+      (p) => {
+        const cur = p.purchases || [];
+        const i = cur.findIndex((x) => x.id === targetId);
+        if (i === -1) return p;
+        return {
+          ...p,
+          points: (p.points || 0) + refunded,
+          purchases: [...cur.slice(0, i), ...cur.slice(i + 1)],
+        };
+      },
+      { action: "보상 환불", detail: `"${rewardName}" 1개 교환 취소 (+${refunded}P 반환)` }
+    );
+    logActivity("refund", `${theme.realName}님이 "${rewardName}" 교환을 취소했습니다 (+${refunded}P 반환)`);
+    showToast(`"${rewardName}" 취소 · +${refunded}P 반환`);
+  };
+
   // 사용 처리 취소(되돌리기): 사용 개수를 1 줄임
   const undoUsedReward = (rewardName) => {
     if (!isMaster) return;
@@ -1300,7 +1329,7 @@ export default function StudyBuddy() {
           )}
           {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} targetDate={targetDate} chat={data.chat || []} sendChat={sendChat} deleteChat={deleteChat} currentUser={currentUser} />}
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
-          {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />}
+          {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} refundOwnedReward={refundOwnedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
           {tab === "admin" && <AdminTab data={data} isMaster={isMaster} resetUserPw={resetUserPw} locations={data.locations || {}} exportBackup={exportBackup} importBackup={importBackup} connected={connected} awardBonusToKid={awardBonusToKid} deductPointsFromKid={deductPointsFromKid} resetPointsForKid={resetPointsForKid} restoreFromSafety={restoreFromSafety} safetySnap={safetySnap} />}
         </main>
@@ -1972,7 +2001,7 @@ function ActivityFeed({ theme, activityLog, open, setOpen }) {
 
   const KIND_DOT = {
     start: "bg-sky-400", stop: "bg-emerald-400", done: "bg-amber-400",
-    approve: "bg-violet-400", buy: "bg-rose-400", cancel: "bg-orange-400", use: "bg-teal-400", bonus: "bg-fuchsia-400",
+    approve: "bg-violet-400", buy: "bg-rose-400", cancel: "bg-orange-400", use: "bg-teal-400", bonus: "bg-fuchsia-400", refund: "bg-emerald-400",
   };
 
   // 날짜별 그룹핑 (펼친 상태에서만 사용)
@@ -2335,9 +2364,9 @@ function TodoItem({ todo, theme, onStudent, onParent, onEdit, onDelete, compact 
 }
 
 // ═══════════ 상점 탭 ═══════════
-function ShopTab({ theme, profile, buyReward, addReward, deleteReward, editReward, isMaster, useOwnedReward, undoUsedReward }) {
+function ShopTab({ theme, profile, buyReward, addReward, deleteReward, editReward, isMaster, useOwnedReward, undoUsedReward, refundOwnedReward }) {
   const [view, setView] = useState("shop");
-  if (view === "history") return <PurchaseHistory theme={theme} profile={profile} onBack={() => setView("shop")} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} />;
+  if (view === "history") return <PurchaseHistory theme={theme} profile={profile} onBack={() => setView("shop")} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} refundOwnedReward={refundOwnedReward} />;
   return <ShopMain theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} onHistory={() => setView("history")} />;
 }
 
@@ -2457,7 +2486,8 @@ function ShopMain({ theme, profile, buyReward, addReward, deleteReward, editRewa
 }
 
 // ═══════════ 교환 내역 ═══════════
-function PurchaseHistory({ theme, profile, onBack, isMaster, useOwnedReward, undoUsedReward }) {
+function PurchaseHistory({ theme, profile, onBack, isMaster, useOwnedReward, undoUsedReward, refundOwnedReward }) {
+  const [confirmRefund, setConfirmRefund] = useState(null);
   const purchases = profile.purchases || [];
   const usedRewards = profile.usedRewards || {};
   const total = purchases.reduce((s, p) => s + p.cost, 0);
@@ -2522,37 +2552,69 @@ function PurchaseHistory({ theme, profile, onBack, isMaster, useOwnedReward, und
         ) : (
           <div className="space-y-2">
             {ownedList.map((it) => (
-              <div key={it.name} className={`${card} p-3.5 flex items-center gap-3`}>
-                <div className={`w-10 h-10 rounded-xl ${theme.bgSoft} ${theme.text} flex items-center justify-center text-base shrink-0`}>🎫</div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[15px] font-extrabold text-stone-800 truncate">
-                    {it.name} <span className={theme.text}>× {it.remaining}개</span>
-                  </p>
-                  <p className="text-[11px] text-stone-400 mt-0.5 tabular-nums">
-                    누적 {it.bought}개 교환{it.used > 0 ? ` · ${it.used}개 사용` : ""}
-                  </p>
+              <div key={it.name} className={`${card} p-3.5`}>
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-xl ${theme.bgSoft} ${theme.text} flex items-center justify-center text-base shrink-0`}>🎫</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[15px] font-extrabold text-stone-800 truncate">
+                      {it.name} <span className={theme.text}>× {it.remaining}개</span>
+                    </p>
+                    <p className="text-[11px] text-stone-400 mt-0.5 tabular-nums">
+                      누적 {it.bought}개 교환{it.used > 0 ? ` · ${it.used}개 사용` : ""} · 개당 {it.cost}P
+                    </p>
+                  </div>
+                  {!isMaster && (
+                    <span className={`shrink-0 text-lg font-extrabold ${theme.text} tabular-nums`}>{it.remaining}</span>
+                  )}
                 </div>
-                {isMaster ? (
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      onClick={() => useOwnedReward(it.name)}
-                      className={`h-9 px-3 rounded-xl ${theme.bg} text-white text-xs font-extrabold active:scale-95`}
-                    >
-                      1개 사용
-                    </button>
+
+                {confirmRefund === it.name ? (
+                  <div className="mt-2.5 pt-2.5 border-t border-stone-100 space-y-2">
+                    <p className="text-[11px] font-bold text-stone-600">
+                      "{it.name}" 1개를 취소하고 <span className="text-emerald-600">+{it.cost}P</span> 돌려받을까요?
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setConfirmRefund(null)}
+                        className="flex-1 h-10 rounded-xl bg-stone-100 text-stone-600 text-xs font-extrabold active:scale-95"
+                      >
+                        취소
+                      </button>
+                      <button
+                        onClick={() => { refundOwnedReward(it.name); setConfirmRefund(null); }}
+                        className="flex-1 h-10 rounded-xl bg-emerald-500 text-white text-xs font-extrabold active:scale-95"
+                      >
+                        네, 환불할게요
+                      </button>
+                    </div>
                   </div>
                 ) : (
-                  <span className={`shrink-0 text-lg font-extrabold ${theme.text} tabular-nums`}>{it.remaining}</span>
+                  <div className="mt-2.5 pt-2.5 border-t border-stone-100 flex gap-2">
+                    {isMaster && (
+                      <button
+                        onClick={() => useOwnedReward(it.name)}
+                        className={`flex-1 h-10 rounded-xl ${theme.bg} text-white text-xs font-extrabold active:scale-95`}
+                      >
+                        1개 사용
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setConfirmRefund(it.name)}
+                      className="flex-1 h-10 rounded-xl border-2 border-emerald-200 text-emerald-600 text-xs font-extrabold active:scale-95"
+                    >
+                      환불 (+{it.cost}P)
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
           </div>
         )}
-        {isMaster && (
-          <p className="text-[10px] text-stone-400 px-1 leading-relaxed">
-            "1개 사용"을 누르면 보유 개수가 하나 줄어요. 실수했다면 아래 "사용한 교환권"에서 되돌릴 수 있어요.
-          </p>
-        )}
+        <p className="text-[10px] text-stone-400 px-1 leading-relaxed">
+          {isMaster
+            ? '"1개 사용"을 누르면 보유 개수가 줄어요. 아직 안 쓴 교환권은 "환불"로 포인트를 돌려받을 수 있어요.'
+            : "아직 사용하지 않은 교환권은 환불해서 포인트를 돌려받을 수 있어요."}
+        </p>
       </section>
 
       {/* ── 사용한 교환권 (관리자만, 되돌리기 가능) ── */}
@@ -3088,7 +3150,7 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
     "2차 승인": "text-emerald-500", "2차 승인 취소": "text-orange-500",
     "삭제": "text-red-500",
     "보상 추가": "text-violet-500", "보상 삭제": "text-red-500", "보상 교환": "text-pink-500", "보상 수정": "text-amber-500",
-    "보상 사용": "text-teal-500", "보상 사용 취소": "text-orange-500",
+    "보상 사용": "text-teal-500", "보상 사용 취소": "text-orange-500", "보상 환불": "text-emerald-500",
     "특별포인트": "text-fuchsia-500", "특별포인트 취소": "text-orange-500",
     "포인트 회수": "text-orange-500", "특별포인트 회수": "text-orange-500", "포인트 초기화": "text-red-500",
     "회원가입": "text-sky-500", "비번 초기화": "text-amber-500",
