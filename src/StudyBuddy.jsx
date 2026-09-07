@@ -29,10 +29,9 @@ const DOC_REF = doc(db, "studyroom", "shared");
 // Firebase 연결 키가 아직 예시값("여기에-...")인지 검사 → 연결 안내를 위해 사용
 const FB_CONFIGURED = !String(firebaseConfig.apiKey || "").includes("여기에");
 
-const STORAGE_KEY = "studybuddy-v5";
-const APP_VERSION = "v11.0-FB";
+const APP_VERSION = "v11.2-FB";
 // 배포(빌드)한 날짜. 코드를 수정해 다시 배포할 때마다 이 값을 그날 날짜로 갱신하면 홈 하단에 자동 반영됩니다.
-const LAST_UPDATED = "2026-08-04";
+const LAST_UPDATED = "2026-08-05";
 const MASTERS = [
   { name: "이경묵", pw: "6476" },
   { name: "민지선", pw: "5551" },
@@ -55,10 +54,28 @@ const SUBJECTS = [
 
 // 혼공 누적 목표 시간 (시간 단위)
 const STUDY_GOAL_HOURS = 5840;
-// 한 번에 인정하는 최대 연속 학습 시간(분). 끄는 걸 잊은 타이머가 누적시간을 오염시키는 걸 방지
-const MAX_SESSION_MIN = 720; // 12시간
-// 이 시간을 넘기면 화면에 "오래 실행 중" 경고 표시(분)
-const LONG_SESSION_WARN_MIN = 240; // 4시간
+// 타이머 자동 종료 시간(분). 이 시간이 지나면 자동으로 종료되고 기록된다.
+// 끄는 걸 잊어도 이 값을 넘겨 기록되지 않는다.
+const SESSION_LIMIT_MIN = 50;
+// 자동 종료 후 권장 휴식 시간(분)
+const BREAK_MIN = 5;
+// 주간 목표 시간(시간). 5,840시간은 너무 멀어서 체감이 안 되므로 짧은 목표를 함께 보여줌
+const WEEKLY_GOAL_HOURS = 10;
+
+// 진동 알림 (지원하는 기기에서만 동작, 소리는 사용하지 않음)
+// 기기별 설정으로 끌 수 있음 (서버에 저장하지 않음)
+const VIBRATE_KEY = "studybuddy-vibrate";
+const vibrateOn = () => {
+  try { return localStorage.getItem(VIBRATE_KEY) !== "0"; } catch (e) { return true; }
+};
+const buzz = (pattern) => {
+  try {
+    if (navigator.vibrate && vibrateOn()) navigator.vibrate(pattern);
+  } catch (e) { /* 미지원 기기 무시 */ }
+};
+const BUZZ_SESSION_END = [200, 100, 200, 100, 400]; // 50분 완료
+const BUZZ_BREAK_END = [150, 80, 150];              // 휴식 끝
+const BUZZ_TAP = 30;                                // 가벼운 확인
 
 // 특별 포인트: 부모(관리자)가 체크하면 그날 20포인트 지급
 const BONUS_PTS = 20;
@@ -224,6 +241,29 @@ function startOfMonth() {
   return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
 }
 
+// 연속 학습일(스트릭): 오늘(또는 어제)부터 거슬러 올라가며 공부 기록이 있는 날을 센다
+function computeStreak(profile) {
+  const logs = profile.timerLogs || [];
+  if (logs.length === 0) return 0;
+  const days = new Set(logs.map((l) => new Date(l.at).toDateString()));
+  let streak = 0;
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  // 오늘 아직 안 했으면 어제부터 세기 시작 (오늘 중에 하면 이어지므로 끊긴 걸로 보지 않음)
+  if (!days.has(d.toDateString())) d.setDate(d.getDate() - 1);
+  while (days.has(d.toDateString())) {
+    streak += 1;
+    d.setDate(d.getDate() - 1);
+  }
+  return streak;
+}
+
+// 이번 주 공부한 시간(분)
+function weeklyStudyMin(profile) {
+  const ws = startOfWeek();
+  return (profile.timerLogs || []).filter((l) => l.at >= ws).reduce((s, l) => s + l.minutes, 0);
+}
+
 function computeStats(profile, start, end) {
   const inRange = (ms) => ms != null && ms >= start && ms < end;
   const todos = profile.todos.filter((t) => inRange(t.createdAt) || inRange(t.doneAt));
@@ -304,6 +344,10 @@ export default function StudyBuddy() {
   const [staleDevice, setStaleDevice] = useState(null);
   const [updateAvailable, setUpdateAvailable] = useState(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  // 휴식 종료 시각(ms). 자동 종료 후 5분 휴식 안내용. 기기별 상태라 서버에 저장하지 않음
+  const [breakUntil, setBreakUntil] = useState(null);
+  // 방금 끝난 세션 (이어서 하기 버튼용)
+  const [lastSession, setLastSession] = useState(null);
   const [toast, setToast] = useState(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [targetDate, setTargetDate] = useState(() => todayStartMs());
@@ -829,6 +873,7 @@ export default function StudyBuddy() {
       { action: nowChecked ? "1차 완료" : "1차 취소", detail: `"${target.text}"${nowChecked ? " — 부모 확인 대기" : ""}` }
     );
     if (nowChecked) {
+      buzz(BUZZ_TAP);
       logActivity("done", `${theme.realName}님이 "${target.text}"을(를) 완료했습니다 (부모 확인 대기)`);
       showToast("1차 완료 — 부모 확인 대기");
     }
@@ -848,6 +893,7 @@ export default function StudyBuddy() {
       }),
       { action: approve ? "2차 승인" : "2차 승인 취소", detail: approve ? `"${target.text}" (+${target.pts}P 지급)` : `"${target.text}" (승인 취소 · ${target.pts}P 반납)` }
     );
+    if (approve) buzz([80, 50, 80]);
     if (approve) logActivity("approve", `${currentUser.name}님이 ${theme.realName}님의 "${target.text}"을(를) 승인했습니다 (+${target.pts}P)`);
     else logActivity("cancel", `${currentUser.name}님이 ${theme.realName}님의 "${target.text}" 승인을 취소했습니다 (${target.pts}P 반납)`);
     showToast(approve ? `승인 완료 · +${target.pts}P` : `승인 취소 · ${target.pts}P 반납`);
@@ -909,6 +955,7 @@ export default function StudyBuddy() {
       },
       { action: "보상 교환", detail: `"${reward.name}" (-${reward.cost}P)` }
     );
+    buzz([100, 60, 100, 60, 200]);
     logActivity("buy", `${theme.realName}님이 ${reward.cost}포인트를 ${reward.name}(으)로 교환했습니다`);
     showToast(`'${reward.name}' 교환 완료`);
     return true;
@@ -1051,6 +1098,7 @@ export default function StudyBuddy() {
         activityLog: [actEntry, ...(prev.activityLog || [])].slice(0, 200),
       };
     });
+    buzz([80, 50, 80]);
     showToast(`${th.realName} · ${label} ${amount >= 0 ? "+" : ""}${amount}P`);
     return true;
   };
@@ -1133,35 +1181,35 @@ export default function StudyBuddy() {
 
   const startTimer = (subject) => {
     const subjLabel = SUBJECTS.find((s) => s.id === subject)?.label;
+    buzz(BUZZ_TAP);
+    setBreakUntil(null);   // 휴식 중이었다면 바로 해제
+    setLastSession(null);  // 새 세션 시작 → "이어서 하기" 숨김
     updateProfile((p) => ({ ...p, timerActive: { subject, startAt: now() } }), null);
     logActivity("start", `${theme.realName}님이 ${subjLabel} 공부를 시작했습니다`);
     showToast(`${subjLabel} 타이머 시작`);
   };
 
-  const stopTimer = () => {
+  // auto=true 이면 자동 종료(50분 도달 또는 앱 복귀 시 초과 감지)
+  const stopTimer = (auto = false) => {
     const active = profile.timerActive;
     if (!active) return;
+    if (!auto) {
+      buzz(BUZZ_TAP);
+      setLastSession({ subject: active.subject, at: Date.now() }); // 수동 종료도 이어서 하기 제공
+    }
     const subjLabel = SUBJECTS.find((s) => s.id === active.subject)?.label;
     const rawMinutes = Math.round((Date.now() - active.startAt) / 60000);
 
-    // 끄는 걸 잊은 타이머 방어: 비정상적으로 긴 세션은 사용자에게 확인 후 조정/폐기
     let minutes = rawMinutes;
     let capped = false;
-    if (rawMinutes > MAX_SESSION_MIN) {
-      const ok = window.confirm(
-        `타이머가 ${fmtDur(rawMinutes)} 동안 켜져 있었어요.\n` +
-        `끄는 걸 잊으신 것 같습니다.\n\n` +
-        `[확인] ${fmtDur(MAX_SESSION_MIN)}으로 줄여서 기록\n` +
-        `[취소] 이번 기록은 저장하지 않음`
-      );
-      if (!ok) {
-        // 기록하지 않고 타이머만 해제
-        updateProfile((p) => ({ ...p, timerActive: null }), { action: "타이머 기록 취소", detail: `${subjLabel} (${fmtDur(rawMinutes)} 비정상 세션 폐기)` });
-        logActivity("stop", `${theme.realName}님이 ${subjLabel} 타이머를 종료했습니다 (기록 안 함)`);
-        showToast("기록하지 않고 타이머를 껐어요");
-        return;
-      }
-      minutes = MAX_SESSION_MIN;
+
+    if (auto) {
+      // 자동 종료: 무조건 50분으로 기록 (묻지 않음)
+      minutes = Math.min(rawMinutes, SESSION_LIMIT_MIN);
+      capped = rawMinutes > SESSION_LIMIT_MIN;
+    } else if (rawMinutes > SESSION_LIMIT_MIN) {
+      // 수동 종료인데 이미 50분을 넘겼다면 상한만 적용 (끄는 걸 잊은 경우)
+      minutes = SESSION_LIMIT_MIN;
       capped = true;
     }
 
@@ -1174,16 +1222,56 @@ export default function StudyBuddy() {
           : (p.timerLogs || []),
       }),
       minutes > 0
-        ? { action: "타이머 기록", detail: `${subjLabel} ${fmtDur(minutes)}${capped ? ` (원래 ${fmtDur(rawMinutes)} → 상한 조정)` : ""}` }
+        ? {
+            action: auto ? "타이머 자동종료" : "타이머 기록",
+            detail: `${subjLabel} ${fmtDur(minutes)}${capped ? ` (실제 ${fmtDur(rawMinutes)} → ${fmtDur(SESSION_LIMIT_MIN)} 상한 적용)` : ""}`,
+          }
         : null
     );
     logActivity("stop", minutes > 0
-      ? `${theme.realName}님이 ${subjLabel} 공부를 종료했습니다 (${fmtDur(minutes)})`
+      ? `${theme.realName}님이 ${subjLabel} 공부를 ${auto ? "자동 종료했습니다" : "종료했습니다"} (${fmtDur(minutes)})`
       : `${theme.realName}님이 ${subjLabel} 타이머를 종료했습니다`);
     showToast(minutes > 0
-      ? (capped ? `${fmtDur(minutes)}으로 조정해 기록했어요` : `${subjLabel} ${fmtDur(minutes)} 기록`)
+      ? (auto
+          ? `${fmtDur(SESSION_LIMIT_MIN)} 자동 종료 · ${fmtDur(minutes)} 기록`
+          : capped ? `${fmtDur(minutes)}으로 조정해 기록했어요` : `${subjLabel} ${fmtDur(minutes)} 기록`)
       : "1분 미만은 저장 안 돼요");
   };
+
+  // ⏰ 50분 자동 종료 감시: 앱이 켜져 있는 동안 도달하면 즉시, 꺼졌다 돌아와도 초과분을 감지해 종료
+  const autoStopLock = useRef(null);
+  useEffect(() => {
+    const active = profile.timerActive;
+    if (!active || !hydrated.current) return;
+    // 같은 세션을 여러 번 자동종료하지 않도록 잠금
+    if (autoStopLock.current === active.startAt) return;
+
+    const check = () => {
+      const elapsedMin = (Date.now() - active.startAt) / 60000;
+      if (elapsedMin >= SESSION_LIMIT_MIN) {
+        autoStopLock.current = active.startAt;
+        buzz(BUZZ_SESSION_END);            // 진동으로 알림 (소리 없음)
+        setLastSession({ subject: active.subject, at: Date.now() }); // "이어서 하기"용
+        setBreakUntil(Date.now() + BREAK_MIN * 60000); // 5분 휴식 시작
+        stopTimer(true);
+      }
+    };
+    check(); // 앱 복귀 직후 이미 초과했는지 먼저 확인
+    const id = setInterval(check, 10000); // 10초마다 확인
+    return () => clearInterval(id);
+  }, [profile.timerActive, activeKid, loaded]);
+
+  // 휴식 종료 감시: 5분이 지나면 진동으로 알리고 휴식 상태 해제
+  useEffect(() => {
+    if (!breakUntil) return;
+    const id = setInterval(() => {
+      if (Date.now() >= breakUntil) {
+        buzz(BUZZ_BREAK_END);
+        setBreakUntil(null);
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [breakUntil]);
 
   const weekStats = useMemo(() => computeStats(profile, startOfWeek(), now() + 1), [profile]);
 
@@ -1327,7 +1415,7 @@ export default function StudyBuddy() {
               </p>
             </div>
           )}
-          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} targetDate={targetDate} chat={data.chat || []} sendChat={sendChat} deleteChat={deleteChat} currentUser={currentUser} />}
+          {tab === "home" && <HomeTab theme={theme} profile={profile} stats={weekStats} toggleStudent={toggleStudent} toggleParent={toggleParent} goTab={setTab} setTargetDate={setTargetDate} startTimer={startTimer} stopTimer={stopTimer} isMaster={isMaster} activityLog={data.activityLog || []} shareLoc={shareLoc} toggleShareLoc={toggleShareLoc} toggleBonus={toggleBonus} targetDate={targetDate} chat={data.chat || []} sendChat={sendChat} deleteChat={deleteChat} currentUser={currentUser} breakUntil={breakUntil} setBreakUntil={setBreakUntil} lastSession={lastSession} />}
           {tab === "todo" && <TodoTab theme={theme} profile={profile} toggleStudent={toggleStudent} toggleParent={toggleParent} addTodo={addTodo} editTodo={editTodo} deleteTodo={deleteTodo} targetDate={targetDate} setTargetDate={setTargetDate} isMaster={isMaster} />}
           {tab === "shop" && <ShopTab theme={theme} profile={profile} buyReward={buyReward} addReward={addReward} deleteReward={deleteReward} editReward={editReward} isMaster={isMaster} useOwnedReward={useOwnedReward} undoUsedReward={undoUsedReward} refundOwnedReward={refundOwnedReward} />}
           {tab === "dash" && <DashTab theme={theme} profile={profile} />}
@@ -1498,7 +1586,7 @@ function AuthScreen({ login, signup, toast, connected }) {
 }
 
 // ═══════════ 혼공 타이머 (컴팩트) ═══════════
-function TimerWidget({ theme, profile, startTimer, stopTimer }) {
+function TimerWidget({ theme, profile, startTimer, stopTimer, breakUntil, setBreakUntil, lastSession }) {
   const [subject, setSubject] = useState("math");
   const [elapsed, setElapsed] = useState(0);
   const [expanded, setExpanded] = useState(false);
@@ -1520,7 +1608,7 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
   })).filter((s) => s.minutes > 0);
   const totalMin = todayLogs.reduce((sum, l) => sum + l.minutes, 0);
   const runningSubject = active ? SUBJECTS.find((s) => s.id === active.subject) : null;
-  const runningMin = active ? Math.floor(elapsed / 60) : 0;
+  const runningMin = active ? Math.min(Math.floor(elapsed / 60), SESSION_LIMIT_MIN) : 0;
   const projectedTotal = totalMin + runningMin;
 
   // 전체 누적 혼공시간 (기록 전체 + 진행 중인 타이머)
@@ -1530,6 +1618,23 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
   const fmtHours = (h) => (h >= 100 ? Math.round(h).toLocaleString() : h.toFixed(1));
 
   const fmtElapsed = (sec) => `${pad2(Math.floor(sec / 3600))}:${pad2(Math.floor((sec % 3600) / 60))}:${pad2(sec % 60)}`;
+  // 자동 종료까지 남은 시간(초)
+  const remainSec = active ? Math.max(0, SESSION_LIMIT_MIN * 60 - elapsed) : 0;
+
+  // 휴식 남은 시간(초) — 1초마다 갱신
+  const [breakLeft, setBreakLeft] = useState(0);
+  useEffect(() => {
+    if (!breakUntil) { setBreakLeft(0); return; }
+    const tick = () => setBreakLeft(Math.max(0, Math.ceil((breakUntil - Date.now()) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [breakUntil]);
+
+  // 연속 학습일 + 이번 주 목표 진행률
+  const streak = useMemo(() => computeStreak(profile), [profile.timerLogs]);
+  const weekMin = useMemo(() => weeklyStudyMin(profile), [profile.timerLogs]) + runningMin;
+  const weekPct = Math.min(100, (weekMin / (WEEKLY_GOAL_HOURS * 60)) * 100);
 
   return (
     <div className={`${card} p-4`}>
@@ -1547,21 +1652,74 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
             시작
           </button>
         ) : (
-          <button onClick={stopTimer} className="h-14 px-6 rounded-2xl bg-stone-800 text-white text-sm font-extrabold active:scale-95">
+          <button onClick={() => stopTimer(false)} className="h-14 px-6 rounded-2xl bg-stone-800 text-white text-sm font-extrabold active:scale-95">
             종료
           </button>
         )}
       </div>
 
-      {/* 오래 실행 중인 타이머 경고 (끄는 걸 잊은 경우) */}
-      {active && Math.floor(elapsed / 60) >= LONG_SESSION_WARN_MIN && (
-        <div className="mt-2.5 rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 flex items-start gap-2">
-          <span className="text-xs shrink-0 mt-0.5">⏰</span>
-          <p className="text-[11px] font-bold text-amber-700 leading-snug">
-            타이머가 {fmtDur(Math.floor(elapsed / 60))}째 실행 중이에요. 끄는 걸 잊었다면 지금 종료해 주세요.
-            {Math.floor(elapsed / 60) > MAX_SESSION_MIN && ` (${fmtDur(MAX_SESSION_MIN)}을 넘으면 기록 시 조정됩니다)`}
-          </p>
+      {/* 자동 종료까지 남은 시간 */}
+      {active && (
+        <div className="mt-2.5">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-bold text-stone-400">
+              {SESSION_LIMIT_MIN}분 뒤 자동 종료
+            </span>
+            <span className={`text-[11px] font-extrabold tabular-nums ${remainSec <= 300 ? "text-amber-600" : theme.text}`}>
+              {remainSec > 0 ? `${Math.floor(remainSec / 60)}분 ${pad2(remainSec % 60)}초 남음` : "종료 처리 중…"}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-stone-100 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-1000 ${remainSec <= 300 ? "bg-amber-400" : theme.bg}`}
+              style={{ width: `${Math.min(100, (elapsed / (SESSION_LIMIT_MIN * 60)) * 100)}%` }}
+            />
+          </div>
+          {remainSec <= 300 && remainSec > 0 && (
+            <p className="text-[10px] font-bold text-amber-600 mt-1.5">
+              곧 자동 종료돼요. 진동으로 알려드릴게요.
+            </p>
+          )}
         </div>
+      )}
+
+      {/* 쉬는 시간 (자동 종료 직후 5분) */}
+      {!active && breakUntil && breakLeft > 0 && (
+        <div className="mt-2.5 rounded-2xl bg-emerald-50 border border-emerald-200 px-3.5 py-3">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-extrabold text-emerald-700">☕ 쉬는 시간</span>
+            <span className="text-[13px] font-extrabold text-emerald-700 tabular-nums">
+              {Math.floor(breakLeft / 60)}:{pad2(breakLeft % 60)}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-emerald-100 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-emerald-400 transition-all duration-1000"
+              style={{ width: `${100 - (breakLeft / (BREAK_MIN * 60)) * 100}%` }}
+            />
+          </div>
+          <div className="flex items-center gap-2 mt-2.5">
+            <p className="flex-1 text-[10px] font-bold text-emerald-600 leading-snug">
+              {BREAK_MIN}분 쉬고 다시 시작해요. 끝나면 진동으로 알려드려요.
+            </p>
+            <button
+              onClick={() => setBreakUntil(null)}
+              className="h-8 px-3 rounded-lg bg-white text-emerald-600 text-[10px] font-extrabold active:scale-95 shrink-0"
+            >
+              건너뛰기
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 이어서 하기 (방금 끝난 과목을 한 번에 다시 시작) */}
+      {!active && lastSession && (!breakUntil || breakLeft <= 0) && (
+        <button
+          onClick={() => startTimer(lastSession.subject)}
+          className={`mt-2.5 w-full h-11 rounded-2xl ${theme.bgSoft} ${theme.textDeep} text-xs font-extrabold active:scale-95 flex items-center justify-center gap-1.5`}
+        >
+          ▶ {SUBJECTS.find((s) => s.id === lastSession.subject)?.label} 이어서 하기
+        </button>
       )}
 
       {/* 혼공 누적 목표 달성 현황 */}
@@ -1581,6 +1739,31 @@ function TimerWidget({ theme, profile, startTimer, stopTimer }) {
             className={`h-full rounded-full ${theme.bg} transition-all duration-500`}
             style={{ width: `${Math.max(goalPct, lifetimeMin > 0 ? 0.5 : 0)}%` }}
           />
+        </div>
+      </div>
+
+      {/* 연속 학습일 + 이번 주 목표 */}
+      <div className="mt-2.5 pt-2.5 border-t border-stone-100 flex items-center gap-2.5">
+        <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl shrink-0 ${streak > 0 ? "bg-orange-50" : "bg-stone-50"}`}>
+          <span className="text-xs">{streak > 0 ? "🔥" : "💤"}</span>
+          <span className={`text-[11px] font-extrabold tabular-nums ${streak > 0 ? "text-orange-600" : "text-stone-400"}`}>
+            {streak > 0 ? `${streak}일 연속` : "오늘 시작!"}
+          </span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline justify-between gap-1">
+            <span className="text-[10px] font-bold text-stone-400 shrink-0">이번 주 {WEEKLY_GOAL_HOURS}시간</span>
+            <span className="text-[10px] font-bold text-stone-500 tabular-nums">
+              <span className={`font-extrabold ${weekPct >= 100 ? "text-emerald-600" : theme.text}`}>{fmtDur(weekMin)}</span>
+              {weekPct >= 100 ? " 달성! 🎉" : ` · ${Math.round(weekPct)}%`}
+            </span>
+          </div>
+          <div className="mt-1 h-1.5 rounded-full bg-stone-100 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${weekPct >= 100 ? "bg-emerald-400" : theme.bg}`}
+              style={{ width: `${Math.max(weekPct, weekMin > 0 ? 1 : 0)}%` }}
+            />
+          </div>
         </div>
       </div>
 
@@ -1734,7 +1917,7 @@ function BonusPanel({ theme, profile, isMaster, toggleBonus, targetDate, setTarg
   );
 }
 
-function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc, toggleBonus, targetDate, chat, sendChat, deleteChat, currentUser }) {
+function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, setTargetDate, startTimer, stopTimer, isMaster, activityLog, shareLoc, toggleShareLoc, toggleBonus, targetDate, chat, sendChat, deleteChat, currentUser, breakUntil, setBreakUntil, lastSession }) {
   const todayIdx = (new Date().getDay() + 6) % 7;
   const [logOpen, setLogOpen] = useState(false);
 
@@ -1777,7 +1960,7 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
 
   return (
     <div className="space-y-3.5">
-      <TimerWidget theme={theme} profile={profile} startTimer={startTimer} stopTimer={stopTimer} />
+      <TimerWidget theme={theme} profile={profile} startTimer={startTimer} stopTimer={stopTimer} breakUntil={breakUntil} setBreakUntil={setBreakUntil} lastSession={lastSession} />
 
       {/* ── 특별 포인트 (부모만 체크 가능) ── */}
       <BonusPanel theme={theme} profile={profile} isMaster={isMaster} toggleBonus={toggleBonus} targetDate={targetDate} setTargetDate={setTargetDate} />
@@ -1868,6 +2051,9 @@ function HomeTab({ theme, profile, stats, toggleStudent, toggleParent, goTab, se
 
       {/* ── 공부로그 (온 가족 활동 피드) ── */}
       <ActivityFeed theme={theme} activityLog={activityLog} open={logOpen} setOpen={setLogOpen} />
+
+      {/* ── 진동 알림 설정 (기기별) ── */}
+      <VibrateToggle theme={theme} />
 
       {/* ── 위치 공유 (학생 본인만 표시) ── */}
       {!isMaster && (
@@ -1990,6 +2176,42 @@ function ChatBox({ theme, chat, sendChat, deleteChat, isMaster, currentUser }) {
           전송
         </button>
       </div>
+    </div>
+  );
+}
+
+// ═══════════ 진동 알림 설정 (기기별) ═══════════
+function VibrateToggle({ theme }) {
+  const [on, setOn] = useState(vibrateOn);
+  const supported = typeof navigator !== "undefined" && !!navigator.vibrate;
+
+  const toggle = () => {
+    const next = !on;
+    setOn(next);
+    try { localStorage.setItem(VIBRATE_KEY, next ? "1" : "0"); } catch (e) { /* 무시 */ }
+    if (next) buzz([80, 50, 80]); // 켤 때 한 번 울려서 확인
+  };
+
+  return (
+    <div className={`${card} px-4 py-3 flex items-center gap-3`}>
+      <span className="text-base shrink-0">📳</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-extrabold text-stone-700">진동 알림</p>
+        <p className="text-[10px] text-stone-400 leading-snug mt-0.5">
+          {!supported
+            ? "이 기기는 진동을 지원하지 않아요 (PC 등)"
+            : on
+              ? "타이머 종료·휴식 끝·포인트 획득 때 울려요"
+              : "진동이 꺼져 있어요"}
+        </p>
+      </div>
+      <button
+        onClick={toggle}
+        disabled={!supported}
+        className={`w-12 h-7 rounded-full shrink-0 transition-all relative disabled:opacity-30 ${on && supported ? theme.bg : "bg-stone-200"}`}
+      >
+        <span className={`absolute top-0.5 w-6 h-6 rounded-full bg-white shadow transition-all ${on && supported ? "left-[22px]" : "left-0.5"}`}></span>
+      </button>
     </div>
   );
 }
@@ -3154,7 +3376,7 @@ function AdminTab({ data, isMaster, resetUserPw, locations, exportBackup, import
     "특별포인트": "text-fuchsia-500", "특별포인트 취소": "text-orange-500",
     "포인트 회수": "text-orange-500", "특별포인트 회수": "text-orange-500", "포인트 초기화": "text-red-500",
     "회원가입": "text-sky-500", "비번 초기화": "text-amber-500",
-    "타이머 기록": "text-emerald-500",
+    "타이머 자동종료": "text-amber-500", "타이머 기록": "text-emerald-500",
   };
 
   const filtered = data.history.filter((h) => filter === "all" || h.kidKey === filter);
